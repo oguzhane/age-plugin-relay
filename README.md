@@ -7,7 +7,7 @@ An [age](https://age-encryption.org) plugin that decouples the **location** of a
 ```
 ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay required)
 
-  age1relay1<inner_recipient>                   AGE-PLUGIN-RELAY-1<tag + relay_url>
+  age1relay1<inner_recipient>                   AGE-PLUGIN-RELAY-1<tag + target>
     |                                             |
     v                                             v
   Extract inner recipient string                Receive relay stanzas from age header
@@ -16,10 +16,10 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
   age.ParseRecipients() -> Wrap()               Match stanzas by tag, reconstruct inner stanzas
     |                                             |
     v                                             v
-  Re-tag stanza: X25519 -> relay                HTTP POST inner stanzas to relay URL
+  Re-tag stanza: X25519 -> relay                Resolve target (URL or remote name from config)
     |                                             |
     v                                             v
-  Done. No network. Identity-agnostic.          Remote unwraps with local identity -> file key
+  Done. No network. Identity-agnostic.          HTTP POST inner stanzas -> file key returned
 ```
 
 **Encryption** uses only the inner recipient's public key — no relay, no network, no hardware. The plugin delegates to `age.ParseRecipients()`, so it works with any recipient type the `age` library (or plugins in `PATH`) can parse.
@@ -29,7 +29,9 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
 ## Install
 
 ```bash
-go build -o age-plugin-relay .
+cd infrastructure/zops/age-plugin-relay
+go build -o age-plugin-relay ./cmd/age-plugin-relay/
+go build -o relay-server ./cmd/relay-server/        # optional: test relay server
 ```
 
 Place the binary in your `PATH` so `age` can discover it:
@@ -44,11 +46,23 @@ export PATH="/path/to/age-plugin-relay:$PATH"
 
 ### Generate a relay recipient and identity
 
+**Legacy mode** (URL embedded in identity):
+
 ```bash
 age-plugin-relay --generate \
   --inner-recipient "age1abc..." \
   --relay-url "https://relay.example:8443/unwrap"
 ```
+
+**Config mode** (remote name, resolved from `relay-config.yaml`):
+
+```bash
+age-plugin-relay --generate \
+  --inner-recipient "age1abc..." \
+  --remote orin
+```
+
+Config mode produces shorter identity strings and supports per-remote TLS and timeout. See [Config File](#config-file) below.
 
 Output:
 
@@ -130,14 +144,20 @@ SOPS splits the data encryption key into 2 Shamir shares. Group 1 is decrypted l
 
 The Bech32 data payload is the UTF-8 bytes of the inner age recipient string. The plugin extracts it, calls `age.ParseRecipients()`, and delegates `Wrap()` to the parsed recipient.
 
-### Identity: `AGE-PLUGIN-RELAY-1<bech32(tag || relay_url)>`
+### Identity: `AGE-PLUGIN-RELAY-1<bech32(tag || target)>`
+
+The target is either a full URL (legacy) or a remote name (config mode).
 
 | Field | Size | Description |
 |---|---|---|
 | `tag` | 4 bytes | `SHA-256(inner_recipient_string)[:4]` — matches stanzas to this identity |
-| `relay_url` | variable | UTF-8 relay endpoint URL |
+| `target` | variable | URL (`https://...`) or remote name (`orin`) |
 
 Not secret. Contains no key material — only routing information. Safe to commit to version control.
+
+At decrypt time, the plugin detects the target type:
+- Starts with `http://` or `https://` → use as relay URL directly (legacy)
+- Anything else → look up in `relay-config.yaml` (config mode)
 
 ### Stanza format
 
@@ -206,47 +226,84 @@ Content-Type: application/json
 | 408 | `{"error": "timeout"}` | Identity interaction timed out (e.g., YubiKey not touched) |
 | 503 | `{"error": "unavailable"}` | Relay can't reach the identity |
 
+## Config File
+
+For managing multiple remotes with per-remote TLS and timeout, create a `relay-config.yaml`:
+
+```yaml
+# relay-config.yaml
+remotes:
+  orin:
+    url: https://orin.local:8443/unwrap           # required
+    tls_cert: /path/to/client.crt                  # optional (mTLS)
+    tls_key: /path/to/client.key                   # optional (mTLS)
+    tls_ca: /path/to/ca.crt                        # optional (custom CA)
+    timeout: 5m                                    # optional (default: 5m)
+
+  backup:
+    url: https://backup.example:9999/unwrap
+```
+
+The plugin looks for the config file at:
+1. `AGE_PLUGIN_RELAY_CONFIG` env var (if set)
+2. `$PWD/relay-config.yaml`
+
+Config is optional — URL-based identities work without any config file.
+
+### Resolution priority at decrypt time
+
+Per-remote config takes priority over environment variables:
+
+| Setting | Priority |
+|---|---|
+| TLS cert/key/CA | Remote config > env var (`AGE_PLUGIN_RELAY_TLS_*`) |
+| Timeout | Remote config > env var (`AGE_PLUGIN_RELAY_TIMEOUT`) > default 5m |
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGE_PLUGIN_RELAY_TIMEOUT` | `300s` | HTTP timeout for relay requests. Supports Go duration format (`30s`, `5m`, `1h`). Set high for interactive flows like YubiKey touch. |
-| `AGE_PLUGIN_RELAY_TLS_CERT` | — | Path to client TLS certificate (for mTLS) |
-| `AGE_PLUGIN_RELAY_TLS_KEY` | — | Path to client TLS private key (for mTLS) |
-| `AGE_PLUGIN_RELAY_TLS_CA` | — | Path to CA certificate for server verification |
+| `AGE_PLUGIN_RELAY_CONFIG` | `$PWD/relay-config.yaml` | Path to config file |
+| `AGE_PLUGIN_RELAY_TIMEOUT` | `5m` | HTTP timeout (fallback if not set per-remote). Supports Go duration format. |
+| `AGE_PLUGIN_RELAY_TLS_CERT` | — | Client TLS certificate (fallback if not set per-remote) |
+| `AGE_PLUGIN_RELAY_TLS_KEY` | — | Client TLS private key (fallback if not set per-remote) |
+| `AGE_PLUGIN_RELAY_TLS_CA` | — | CA certificate for server verification (fallback if not set per-remote) |
 
 ## Architecture
 
 ```
 age-plugin-relay/
-├── main.go             # Plugin entry point — registers handlers, --generate flag
-├── recipient.go        # RelayRecipient.Wrap() — delegates to inner recipient
-├── identity.go         # RelayIdentity.Unwrap() — matches stanzas, POSTs to relay
-├── relay_client.go     # HTTP client with TLS/mTLS, timeout, JSON protocol
-├── encoding.go         # Bech32 encoding for recipients and identities, tag computation
-├── generate.go         # --generate command with plugin dependency warning
-├── errors.go           # Sentinel errors
-├── parse_helpers.go    # Thin wrappers around filippo.io/age/plugin for tests
-├── relay_test.go       # 7 unit tests including full end-to-end with mock relay
-├── test.sh             # Step-by-step CLI integration test (age encrypt → relay → decrypt)
-└── cmd/
-    └── relay-server/
-        └── main.go     # Minimal HTTP server that unwraps stanzas with a local identity
+├── relay/                              # Importable library (package relay)
+│   ├── encoding.go                     # ComputeTag, EncodeRelayRecipient, EncodeRelayIdentity
+│   ├── errors.go                       # Sentinel errors
+│   ├── recipient.go                    # RelayRecipient, NewRelayRecipient, Wrap
+│   ├── identity.go                     # RelayIdentity, NewRelayIdentity, Unwrap, ResolveRemote
+│   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, HTTP client
+│   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote
+│   ├── relay_test.go                   # 7 unit tests
+│   ├── integration_test.go             # 6 integration tests (mock relay, config, errors)
+│   └── e2e_test.go                     # 2 E2E tests (real binaries, full user flow)
+├── cmd/
+│   ├── age-plugin-relay/
+│   │   └── main.go                     # Plugin binary: flags, --generate, HandleRecipient/Identity
+│   └── relay-server/
+│       └── main.go                     # Minimal relay HTTP server (imports relay package)
+├── test.sh                             # Step-by-step CLI integration test
+└── README.md
 ```
 
 ### Dependencies
 
 - [`filippo.io/age`](https://pkg.go.dev/filippo.io/age) v1.3.1 — age types (`Recipient`, `Identity`, `Stanza`), recipient parsing
-- [`filippo.io/age/plugin`](https://pkg.go.dev/filippo.io/age/plugin) — Plugin framework (`Plugin.HandleRecipient`, `Plugin.HandleIdentity`, `Plugin.Main`), Bech32 encoding helpers
-
-The plugin framework handles all IPC protocol complexity (stdin/stdout state machines, stanza serialization, `msg`/`confirm` prompts).
+- [`filippo.io/age/plugin`](https://pkg.go.dev/filippo.io/age/plugin) — Plugin framework, Bech32 encoding helpers
+- [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) — Config file parsing
 
 ## Testing
 
 ### Unit tests
 
 ```bash
-go test -v ./...
+go test -v ./relay/
 ```
 
 | Test | What it validates |
@@ -254,10 +311,28 @@ go test -v ./...
 | `TestComputeTagDeterministic` | Same input always produces same 4-byte tag |
 | `TestComputeTagDifferent` | Different inputs produce different tags |
 | `TestEncodeDecodeRecipient` | `age1relay1...` round-trips through Bech32 encode/decode |
-| `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and URL preserved |
+| `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and target preserved |
 | `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, inner type `X25519` |
 | `TestEndToEndWithMockRelay` | Full flow: generate key pair, wrap via relay, mock HTTP server unwraps, file key matches |
 | `TestUnwrapNoMatchingStanza` | Non-matching stanzas return `age.ErrIncorrectIdentity` |
+
+### Integration tests
+
+| Test | What it validates |
+|---|---|
+| `TestIntegrationLegacyURL` | Full `age.Encrypt` → `age.Decrypt` with URL in identity |
+| `TestIntegrationConfigMode` | Full encrypt/decrypt with remote name resolved from config |
+| `TestIntegrationConfigMissingRemote` | Clear error for non-existent remote (lists available) |
+| `TestIntegrationNoConfigFile` | URL-based identities work without any config file |
+| `TestIntegrationRelayServerDown` | Clean error when relay endpoint unreachable |
+| `TestIntegrationWrongIdentity` | Clean error when relay has wrong key |
+
+### E2E tests
+
+| Test | What it validates |
+|---|---|
+| `TestE2ELegacyURL` | Full user flow with real `age` + `age-keygen` + plugin + relay-server binaries (URL mode) |
+| `TestE2EConfigMode` | Same with config file: shorter identity, `--remote` flag, env var for config path |
 
 ### Integration test (CLI)
 
