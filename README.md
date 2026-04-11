@@ -29,7 +29,6 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
 ## Install
 
 ```bash
-cd infrastructure/zops/age-plugin-relay
 go build -o age-plugin-relay ./cmd/age-plugin-relay/
 go build -o relay-server ./cmd/relay-server/        # optional: test relay server
 ```
@@ -59,7 +58,7 @@ age-plugin-relay --generate \
 ```bash
 age-plugin-relay --generate \
   --inner-recipient "age1abc..." \
-  --remote orin
+  --remote myserver
 ```
 
 Config mode produces shorter identity strings and supports per-remote TLS and timeout. See [Config File](#config-file) below.
@@ -151,7 +150,7 @@ The target is either a full URL (legacy) or a remote name (config mode).
 | Field | Size | Description |
 |---|---|---|
 | `tag` | 4 bytes | `SHA-256(inner_recipient_string)[:4]` — matches stanzas to this identity |
-| `target` | variable | URL (`https://...`) or remote name (`orin`) |
+| `target` | variable | URL (`https://...`) or remote name (`myserver`) |
 
 Not secret. Contains no key material — only routing information. Safe to commit to version control.
 
@@ -233,8 +232,8 @@ For managing multiple remotes with per-remote TLS and timeout, create a `relay-c
 ```yaml
 # relay-config.yaml
 remotes:
-  orin:
-    url: https://orin.local:8443/unwrap           # required
+  myserver:
+    url: https://relay.example:8443/unwrap         # required
     tls_cert: /path/to/client.crt                  # optional (mTLS)
     tls_key: /path/to/client.key                   # optional (mTLS)
     tls_ca: /path/to/ca.crt                        # optional (custom CA)
