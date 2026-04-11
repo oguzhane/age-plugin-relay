@@ -186,8 +186,8 @@ func TestEndToEndWithMockRelay(t *testing.T) {
 	// 5. Create RelayIdentity pointing to the mock server.
 	tag := ComputeTag(recipientStr)
 	relayIdentity := &RelayIdentity{
-		tag:      tag,
-		relayURL: server.URL,
+		tag:    tag,
+		remote: RemoteConfig{URL: server.URL},
 	}
 
 	// 6. Unwrap via relay.
@@ -204,8 +204,8 @@ func TestEndToEndWithMockRelay(t *testing.T) {
 
 func TestUnwrapNoMatchingStanza(t *testing.T) {
 	id := &RelayIdentity{
-		tag:      [4]byte{0xFF, 0xFF, 0xFF, 0xFF},
-		relayURL: "http://localhost:1/unused",
+		tag:    [4]byte{0xFF, 0xFF, 0xFF, 0xFF},
+		remote: RemoteConfig{URL: "http://localhost:1/unused"},
 	}
 
 	stanzas := []*age.Stanza{

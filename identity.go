@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"filippo.io/age"
 )
@@ -11,18 +12,42 @@ import (
 // RelayIdentity matches relay stanzas by tag and forwards them to a relay URL
 // for unwrapping by a remote identity.
 type RelayIdentity struct {
-	tag      [4]byte
-	relayURL string
+	tag    [4]byte
+	remote RemoteConfig // resolved relay endpoint config
 }
 
 // NewRelayIdentity creates a RelayIdentity from the raw Bech32 data payload
 // of an AGE-PLUGIN-RELAY-1... identity string.
+//
+// The payload after the 4-byte tag is either:
+//   - A full URL (starts with "http://" or "https://") — legacy mode
+//   - A remote name — looked up in relay-config.yaml
 func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
-	tag, relayURL, err := DecodeIdentityData(data)
+	tag, target, err := DecodeIdentityData(data)
 	if err != nil {
 		return nil, err
 	}
-	return &RelayIdentity{tag: tag, relayURL: relayURL}, nil
+
+	remote, err := resolveRemote(target)
+	if err != nil {
+		return nil, fmt.Errorf("resolving relay target %q: %w", target, err)
+	}
+
+	return &RelayIdentity{tag: tag, remote: remote}, nil
+}
+
+// resolveRemote resolves a target string to a RemoteConfig.
+// If it's a URL, wrap it directly. Otherwise, look it up in the config file.
+func resolveRemote(target string) (RemoteConfig, error) {
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		return RemoteConfig{URL: target}, nil
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		return RemoteConfig{}, err
+	}
+	return cfg.LookupRemote(target)
 }
 
 // Unwrap finds relay stanzas matching this identity's tag, reconstructs the
@@ -55,7 +80,7 @@ func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 		return nil, age.ErrIncorrectIdentity
 	}
 
-	fileKey, err := PostToRelay(id.relayURL, matched)
+	fileKey, err := PostToRelay(id.remote, matched)
 	if err != nil {
 		return nil, fmt.Errorf("relay unwrap: %w", err)
 	}

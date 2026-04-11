@@ -35,7 +35,7 @@ type RelayResponse struct {
 }
 
 // PostToRelay sends inner stanzas to the relay URL and returns the unwrapped file key.
-func PostToRelay(relayURL string, stanzas []*age.Stanza) ([]byte, error) {
+func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 	req := RelayRequest{
 		Version: 1,
 		Stanzas: make([]RelayStanza, len(stanzas)),
@@ -53,9 +53,9 @@ func PostToRelay(relayURL string, stanzas []*age.Stanza) ([]byte, error) {
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	client := newHTTPClient()
+	client := newHTTPClient(remote)
 
-	httpReq, err := http.NewRequest("POST", relayURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", remote.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -63,7 +63,7 @@ func PostToRelay(relayURL string, stanzas []*age.Stanza) ([]byte, error) {
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("posting to relay %s: %w", relayURL, err)
+		return nil, fmt.Errorf("posting to relay %s: %w", remote.URL, err)
 	}
 	defer resp.Body.Close()
 
@@ -95,9 +95,12 @@ func PostToRelay(relayURL string, stanzas []*age.Stanza) ([]byte, error) {
 	return fileKey, nil
 }
 
-func newHTTPClient() *http.Client {
-	timeout := 300 * time.Second
-	if v := os.Getenv("AGE_PLUGIN_RELAY_TIMEOUT"); v != "" {
+// newHTTPClient builds an HTTP client from a RemoteConfig.
+// Per-remote settings take priority; env vars are used as fallback.
+func newHTTPClient(remote RemoteConfig) *http.Client {
+	// Timeout: remote config > env var > default 5m
+	timeout := remote.TimeoutDuration()
+	if v := os.Getenv("AGE_PLUGIN_RELAY_TIMEOUT"); v != "" && remote.Timeout == "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			timeout = d
 		}
@@ -106,8 +109,15 @@ func newHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	tlsConfig := &tls.Config{}
 
-	certFile := os.Getenv("AGE_PLUGIN_RELAY_TLS_CERT")
-	keyFile := os.Getenv("AGE_PLUGIN_RELAY_TLS_KEY")
+	// TLS client cert: remote config > env var
+	certFile := remote.TLSCert
+	keyFile := remote.TLSKey
+	if certFile == "" {
+		certFile = os.Getenv("AGE_PLUGIN_RELAY_TLS_CERT")
+	}
+	if keyFile == "" {
+		keyFile = os.Getenv("AGE_PLUGIN_RELAY_TLS_KEY")
+	}
 	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err == nil {
@@ -115,7 +125,11 @@ func newHTTPClient() *http.Client {
 		}
 	}
 
-	caFile := os.Getenv("AGE_PLUGIN_RELAY_TLS_CA")
+	// CA cert: remote config > env var
+	caFile := remote.TLSCA
+	if caFile == "" {
+		caFile = os.Getenv("AGE_PLUGIN_RELAY_TLS_CA")
+	}
 	if caFile != "" {
 		caCert, err := os.ReadFile(caFile)
 		if err == nil {

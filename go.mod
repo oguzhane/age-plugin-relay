@@ -2,7 +2,10 @@ module github.com/oguzhane/age-plugin-relay
 
 go 1.25.4
 
-require filippo.io/age v1.3.1
+require (
+	filippo.io/age v1.3.1
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
