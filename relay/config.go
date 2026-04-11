@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"fmt"
@@ -9,8 +9,11 @@ import (
 )
 
 const (
-	defaultConfigFile = "relay-config.yaml"
-	defaultTimeout    = 5 * time.Minute
+	// DefaultConfigFile is the filename looked for in $PWD.
+	DefaultConfigFile = "relay-config.yaml"
+
+	// DefaultTimeout is the HTTP timeout when not configured.
+	DefaultTimeout = 5 * time.Minute
 )
 
 // Config is the top-level relay config file structure.
@@ -27,14 +30,14 @@ type RemoteConfig struct {
 	Timeout string `yaml:"timeout,omitempty"`  // optional: Go duration (default: 5m)
 }
 
-// TimeoutDuration parses the timeout string, falling back to defaultTimeout.
+// TimeoutDuration parses the timeout string, falling back to DefaultTimeout.
 func (r RemoteConfig) TimeoutDuration() time.Duration {
 	if r.Timeout == "" {
-		return defaultTimeout
+		return DefaultTimeout
 	}
 	d, err := time.ParseDuration(r.Timeout)
 	if err != nil {
-		return defaultTimeout
+		return DefaultTimeout
 	}
 	return d
 }
@@ -48,7 +51,7 @@ func (r RemoteConfig) TimeoutDuration() time.Duration {
 func LoadConfig() (*Config, error) {
 	path := os.Getenv("AGE_PLUGIN_RELAY_CONFIG")
 	if path == "" {
-		path = defaultConfigFile
+		path = DefaultConfigFile
 	}
 
 	data, err := os.ReadFile(path)
@@ -70,7 +73,7 @@ func LoadConfig() (*Config, error) {
 // or the remote doesn't exist.
 func (c *Config) LookupRemote(name string) (RemoteConfig, error) {
 	if c == nil || c.Remotes == nil {
-		return RemoteConfig{}, fmt.Errorf("no config file found (looked for %s and AGE_PLUGIN_RELAY_CONFIG)", defaultConfigFile)
+		return RemoteConfig{}, fmt.Errorf("no config file found (looked for %s and AGE_PLUGIN_RELAY_CONFIG)", DefaultConfigFile)
 	}
 	remote, ok := c.Remotes[name]
 	if !ok {

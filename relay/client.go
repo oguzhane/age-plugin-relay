@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"bytes"
@@ -98,7 +98,6 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 // newHTTPClient builds an HTTP client from a RemoteConfig.
 // Per-remote settings take priority; env vars are used as fallback.
 func newHTTPClient(remote RemoteConfig) *http.Client {
-	// Timeout: remote config > env var > default 5m
 	timeout := remote.TimeoutDuration()
 	if v := os.Getenv("AGE_PLUGIN_RELAY_TIMEOUT"); v != "" && remote.Timeout == "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -109,7 +108,6 @@ func newHTTPClient(remote RemoteConfig) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	tlsConfig := &tls.Config{}
 
-	// TLS client cert: remote config > env var
 	certFile := remote.TLSCert
 	keyFile := remote.TLSKey
 	if certFile == "" {
@@ -125,7 +123,6 @@ func newHTTPClient(remote RemoteConfig) *http.Client {
 		}
 	}
 
-	// CA cert: remote config > env var
 	caFile := remote.TLSCA
 	if caFile == "" {
 		caFile = os.Getenv("AGE_PLUGIN_RELAY_TLS_CA")

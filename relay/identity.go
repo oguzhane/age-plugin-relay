@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"bytes"
@@ -12,8 +12,8 @@ import (
 // RelayIdentity matches relay stanzas by tag and forwards them to a relay URL
 // for unwrapping by a remote identity.
 type RelayIdentity struct {
-	tag    [4]byte
-	remote RemoteConfig // resolved relay endpoint config
+	Tag    [4]byte
+	Remote RemoteConfig
 }
 
 // NewRelayIdentity creates a RelayIdentity from the raw Bech32 data payload
@@ -28,17 +28,17 @@ func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
 		return nil, err
 	}
 
-	remote, err := resolveRemote(target)
+	remote, err := ResolveRemote(target)
 	if err != nil {
 		return nil, fmt.Errorf("resolving relay target %q: %w", target, err)
 	}
 
-	return &RelayIdentity{tag: tag, remote: remote}, nil
+	return &RelayIdentity{Tag: tag, Remote: remote}, nil
 }
 
-// resolveRemote resolves a target string to a RemoteConfig.
+// ResolveRemote resolves a target string to a RemoteConfig.
 // If it's a URL, wrap it directly. Otherwise, look it up in the config file.
-func resolveRemote(target string) (RemoteConfig, error) {
+func ResolveRemote(target string) (RemoteConfig, error) {
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
 		return RemoteConfig{URL: target}, nil
 	}
@@ -63,11 +63,10 @@ func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 		if err != nil || len(stanzaTagBytes) != 4 {
 			continue
 		}
-		if !bytes.Equal(stanzaTagBytes, id.tag[:]) {
+		if !bytes.Equal(stanzaTagBytes, id.Tag[:]) {
 			continue
 		}
 
-		// Reconstruct inner stanza: strip "relay" type and tag argument
 		inner := &age.Stanza{
 			Type: s.Args[1],
 			Args: s.Args[2:],
@@ -80,7 +79,7 @@ func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 		return nil, age.ErrIncorrectIdentity
 	}
 
-	fileKey, err := PostToRelay(id.remote, matched)
+	fileKey, err := PostToRelay(id.Remote, matched)
 	if err != nil {
 		return nil, fmt.Errorf("relay unwrap: %w", err)
 	}

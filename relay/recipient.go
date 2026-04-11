@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"encoding/base64"
@@ -21,7 +21,7 @@ type RelayRecipient struct {
 func NewRelayRecipient(data []byte) (*RelayRecipient, error) {
 	innerStr := string(data)
 	if innerStr == "" {
-		return nil, errNoInnerRecipient
+		return nil, ErrNoInnerRecipient
 	}
 
 	recipients, err := age.ParseRecipients(strings.NewReader(innerStr))
