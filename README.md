@@ -182,16 +182,17 @@ On decryption the plugin strips `relay` and the tag, reconstructs the original i
 
 ## Relay Endpoint HTTP Contract
 
-The plugin POSTs to the relay URL during decryption. What serves that URL is entirely decoupled from the plugin.
+The plugin POSTs to the relay URL during decryption. What serves that URL is entirely decoupled from the plugin. The URL is opaque to the plugin — the intent is conveyed by the `action` field in the payload.
 
 ### Request
 
 ```http
-POST /unwrap HTTP/1.1
+POST / HTTP/1.1
 Content-Type: application/json
 
 {
   "version": 1,
+  "action": "unwrap",
   "stanzas": [
     {
       "type": "X25519",
@@ -203,6 +204,7 @@ Content-Type: application/json
 ```
 
 - `version`: Protocol version (currently `1`).
+- `action`: The operation to perform. Currently only `"unwrap"` is defined.
 - `stanzas`: Array of inner stanzas with the relay wrapping stripped. The `body` field is base64 raw standard encoded.
 
 ### Response

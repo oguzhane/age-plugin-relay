@@ -1,5 +1,4 @@
 package relay
-package relay
 
 import (
 	"bytes"

@@ -52,7 +52,7 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "[relay-server] Loaded %d identity(ies) from %s\n", len(identities), identityFile)
 
-	http.HandleFunc("/unwrap", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, relay.RelayResponse{Error: "method not allowed"})
 			return
@@ -74,7 +74,12 @@ func main() {
 		if len(req.Stanzas) > 0 {
 			fmt.Fprintf(os.Stderr, ", type=%s", req.Stanzas[0].Type)
 		}
-		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, ", action=%s\n", req.Action)
+
+		if req.Action != "unwrap" {
+			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "unsupported action: " + req.Action})
+			return
+		}
 
 		// Convert to age.Stanza
 		stanzas := make([]*age.Stanza, len(req.Stanzas))

@@ -18,6 +18,7 @@ import (
 // RelayRequest is the JSON body sent to the relay endpoint.
 type RelayRequest struct {
 	Version int           `json:"version"`
+	Action  string        `json:"action"`
 	Stanzas []RelayStanza `json:"stanzas"`
 }
 
@@ -38,6 +39,7 @@ type RelayResponse struct {
 func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 	req := RelayRequest{
 		Version: 1,
+		Action:  "unwrap",
 		Stanzas: make([]RelayStanza, len(stanzas)),
 	}
 	for i, s := range stanzas {
