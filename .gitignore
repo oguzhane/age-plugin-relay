@@ -1,9 +1,3 @@
-# Binary
-age-plugin-relay
-
-# Relay server binary
-relay-server
-
 # Test artifacts
 tmp/
 
