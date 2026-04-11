@@ -28,6 +28,7 @@ type RemoteConfig struct {
 	TLSKey  string `yaml:"tls_key,omitempty"`  // optional: client key for mTLS
 	TLSCA   string `yaml:"tls_ca,omitempty"`   // optional: CA cert for server verification
 	Timeout string `yaml:"timeout,omitempty"`  // optional: Go duration (default: 5m)
+	Stream  bool   `yaml:"stream,omitempty"`   // optional: use SSE for long-running requests
 }
 
 // TimeoutDuration parses the timeout string, falling back to DefaultTimeout.

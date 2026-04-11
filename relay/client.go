@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"filippo.io/age"
@@ -19,6 +21,7 @@ import (
 type RelayRequest struct {
 	Version int           `json:"version"`
 	Action  string        `json:"action"`
+	Stream  bool          `json:"stream,omitempty"` // request SSE response
 	Stanzas []RelayStanza `json:"stanzas"`
 }
 
@@ -30,16 +33,20 @@ type RelayStanza struct {
 }
 
 // RelayResponse is the JSON response from the relay endpoint.
+// Used for both standard JSON responses and SSE event data.
 type RelayResponse struct {
 	FileKey string `json:"file_key,omitempty"` // base64 raw standard encoding
 	Error   string `json:"error,omitempty"`
 }
 
 // PostToRelay sends inner stanzas to the relay URL and returns the unwrapped file key.
+// If the remote has Stream enabled and the server responds with text/event-stream,
+// the client parses SSE events until a "result" or "error" event arrives.
 func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 	req := RelayRequest{
 		Version: 1,
 		Action:  "unwrap",
+		Stream:  remote.Stream,
 		Stanzas: make([]RelayStanza, len(stanzas)),
 	}
 	for i, s := range stanzas {
@@ -69,7 +76,17 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16)) // 64KB max
+	// Dispatch based on response content type.
+	ct := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "text/event-stream") {
+		return readSSEResponse(resp.Body)
+	}
+	return readJSONResponse(resp)
+}
+
+// readJSONResponse handles standard JSON responses (non-streaming).
+func readJSONResponse(resp *http.Response) ([]byte, error) {
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
 		return nil, fmt.Errorf("reading relay response: %w", err)
 	}
@@ -95,6 +112,107 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 		return nil, fmt.Errorf("decoding file key: %w", err)
 	}
 	return fileKey, nil
+}
+
+// readSSEResponse parses a Server-Sent Events stream, looking for a "result"
+// or "error" event. Heartbeat comments and unknown events are ignored.
+//
+// SSE format (per https://html.spec.whatwg.org/multipage/server-sent-events.html):
+//
+//	event: result
+//	data: {"file_key": "..."}
+//
+//	event: error
+//	data: {"error": "..."}
+//
+//	: heartbeat (comment, ignored)
+func readSSEResponse(r io.Reader) ([]byte, error) {
+	scanner := bufio.NewScanner(r)
+
+	var eventType string
+	var dataBuf strings.Builder
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// SSE comment (heartbeat) — ignore.
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+
+		// Empty line = end of event.
+		if line == "" {
+			if eventType != "" && dataBuf.Len() > 0 {
+				result, done, err := handleSSEEvent(eventType, dataBuf.String())
+				if err != nil {
+					return nil, err
+				}
+				if done {
+					return result, nil
+				}
+			}
+			eventType = ""
+			dataBuf.Reset()
+			continue
+		}
+
+		// Parse field.
+		if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		} else if strings.HasPrefix(line, "data:") {
+			if dataBuf.Len() > 0 {
+				dataBuf.WriteByte('\n')
+			}
+			dataBuf.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading SSE stream: %w", err)
+	}
+
+	// Stream ended without a result or error event.
+	if eventType != "" && dataBuf.Len() > 0 {
+		result, _, err := handleSSEEvent(eventType, dataBuf.String())
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
+
+	return nil, fmt.Errorf("SSE stream ended without result or error event")
+}
+
+// handleSSEEvent processes a single SSE event. Returns (fileKey, done, error).
+func handleSSEEvent(eventType, data string) ([]byte, bool, error) {
+	switch eventType {
+	case "result":
+		var resp RelayResponse
+		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+			return nil, false, fmt.Errorf("decoding SSE result: %w", err)
+		}
+		if resp.Error != "" {
+			return nil, true, fmt.Errorf("relay error: %s", resp.Error)
+		}
+		fileKey, err := base64.RawStdEncoding.DecodeString(resp.FileKey)
+		if err != nil {
+			return nil, false, fmt.Errorf("decoding file key from SSE: %w", err)
+		}
+		return fileKey, true, nil
+
+	case "error":
+		var resp RelayResponse
+		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+			return nil, true, fmt.Errorf("relay SSE error (unparseable): %s", data)
+		}
+		return nil, true, fmt.Errorf("relay error: %s", resp.Error)
+
+	default:
+		// Unknown event type — ignore (forward compat).
+		return nil, false, nil
+	}
 }
 
 // newHTTPClient builds an HTTP client from a RemoteConfig.

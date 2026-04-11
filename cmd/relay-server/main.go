@@ -74,7 +74,7 @@ func main() {
 		if len(req.Stanzas) > 0 {
 			fmt.Fprintf(os.Stderr, ", type=%s", req.Stanzas[0].Type)
 		}
-		fmt.Fprintf(os.Stderr, ", action=%s\n", req.Action)
+		fmt.Fprintf(os.Stderr, ", action=%s, stream=%v\n", req.Action, req.Stream)
 
 		if req.Action != "unwrap" {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "unsupported action: " + req.Action})
@@ -101,15 +101,23 @@ func main() {
 			fileKey, err := id.Unwrap(stanzas)
 			if err == nil {
 				fmt.Fprintf(os.Stderr, "[relay-server] Unwrap succeeded, returning file key\n")
-				writeJSON(w, http.StatusOK, relay.RelayResponse{
-					FileKey: base64.RawStdEncoding.EncodeToString(fileKey),
-				})
+				fk := base64.RawStdEncoding.EncodeToString(fileKey)
+
+				if req.Stream {
+					writeSSE(w, "result", relay.RelayResponse{FileKey: fk})
+				} else {
+					writeJSON(w, http.StatusOK, relay.RelayResponse{FileKey: fk})
+				}
 				return
 			}
 		}
 
 		fmt.Fprintf(os.Stderr, "[relay-server] No identity could unwrap the stanzas\n")
-		writeJSON(w, http.StatusNotFound, relay.RelayResponse{Error: "no_matching_identity"})
+		if req.Stream {
+			writeSSE(w, "error", relay.RelayResponse{Error: "no_matching_identity"})
+		} else {
+			writeJSON(w, http.StatusNotFound, relay.RelayResponse{Error: "no_matching_identity"})
+		}
 	})
 
 	fmt.Fprintf(os.Stderr, "[relay-server] Listening on %s\n", addr)
@@ -132,4 +140,18 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+func writeSSE(w http.ResponseWriter, event string, v any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	data, _ := json.Marshal(v)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -206,4 +207,118 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 			FileKey: base64.RawStdEncoding.EncodeToString(fileKey),
 		})
 	}))
+}
+
+// newMockSSERelayServer starts an httptest server that responds with SSE events.
+func newMockSSERelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RelayRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var stanzas []*age.Stanza
+		for _, s := range req.Stanzas {
+			body, _ := base64.RawStdEncoding.DecodeString(s.Body)
+			stanzas = append(stanzas, &age.Stanza{
+				Type: s.Type,
+				Args: s.Args,
+				Body: body,
+			})
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		// Send a heartbeat comment first.
+		fmt.Fprintf(w, ": heartbeat\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		fileKey, err := identity.Unwrap(stanzas)
+		if err != nil {
+			data, _ := json.Marshal(RelayResponse{Error: err.Error()})
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+			return
+		}
+
+		data, _ := json.Marshal(RelayResponse{
+			FileKey: base64.RawStdEncoding.EncodeToString(fileKey),
+		})
+		fmt.Fprintf(w, "event: result\ndata: %s\n\n", data)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+}
+
+func TestEndToEndWithSSERelay(t *testing.T) {
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipientStr := identity.Recipient().String()
+
+	server := newMockSSERelayServer(t, identity)
+	defer server.Close()
+
+	relayRecipient, err := NewRelayRecipient([]byte(recipientStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+
+	stanzas, err := relayRecipient.Wrap(fileKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL, Stream: true},
+	}
+
+	recovered, err := relayIdentity.Unwrap(stanzas)
+	if err != nil {
+		t.Fatalf("SSE Unwrap: %v", err)
+	}
+
+	if !bytes.Equal(recovered, fileKey) {
+		t.Fatalf("file key mismatch:\n  got:  %x\n  want: %x", recovered, fileKey)
+	}
+	t.Log("SSE relay unwrap succeeded")
+}
+
+func TestSSERelayError(t *testing.T) {
+	// Encrypt to identity A, relay has identity B (wrong key) via SSE.
+	identityA, _ := age.GenerateX25519Identity()
+	identityB, _ := age.GenerateX25519Identity()
+	recipientA := identityA.Recipient().String()
+
+	server := newMockSSERelayServer(t, identityB)
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientA))
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+	stanzas, _ := relayRecipient.Wrap(fileKey)
+
+	tag := ComputeTag(recipientA)
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL, Stream: true},
+	}
+
+	_, err := relayIdentity.Unwrap(stanzas)
+	if err == nil {
+		t.Fatal("expected error from SSE relay with wrong identity")
+	}
+	t.Logf("Got expected SSE error: %v", err)
 }

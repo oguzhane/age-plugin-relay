@@ -193,6 +193,7 @@ Content-Type: application/json
 {
   "version": 1,
   "action": "unwrap",
+  "stream": true,
   "stanzas": [
     {
       "type": "X25519",
@@ -205,6 +206,7 @@ Content-Type: application/json
 
 - `version`: Protocol version (currently `1`).
 - `action`: The operation to perform. Currently only `"unwrap"` is defined.
+- `stream`: Optional. If `true`, the client accepts SSE responses. See [Streaming (SSE)](#streaming-sse).
 - `stanzas`: Array of inner stanzas with the relay wrapping stripped. The `body` field is base64 raw standard encoded.
 
 ### Response
@@ -227,6 +229,37 @@ Content-Type: application/json
 | 408 | `{"error": "timeout"}` | Identity interaction timed out (e.g., YubiKey not touched) |
 | 503 | `{"error": "unavailable"}` | Relay can't reach the identity |
 
+### Streaming (SSE)
+
+For long-running relay scenarios (approval flows, remote YubiKey touch), the server can respond with Server-Sent Events instead of a single JSON response. This keeps the connection alive through proxies and load balancers.
+
+SSE is enabled per-remote via the `stream` field in `relay-config.yaml`. When enabled, the plugin sends `"stream": true` in the request payload. The client detects the response type from `Content-Type`:
+
+- `application/json` → standard JSON (legacy, always works)
+- `text/event-stream` → SSE stream
+
+Servers that don't support SSE simply ignore the `stream` field and return JSON.
+
+#### SSE events
+
+| Event | Data | Meaning |
+|---|---|---|
+| `result` | `{"file_key": "..."}` | Unwrap succeeded — stream ends |
+| `error` | `{"error": "..."}` | Unwrap failed — stream ends |
+| `: comment` | (none) | Heartbeat — keeps connection alive |
+
+Example SSE response:
+
+```
+: heartbeat
+
+event: result
+data: {"file_key": "dGVzdGtleS4uLi4uLi4u"}
+
+```
+
+Unknown event types are silently ignored for forward compatibility.
+
 ## Config File
 
 For managing multiple remotes with per-remote TLS and timeout, create a `relay-config.yaml`:
@@ -240,6 +273,7 @@ remotes:
     tls_key: /path/to/client.key                   # optional (mTLS)
     tls_ca: /path/to/ca.crt                        # optional (custom CA)
     timeout: 5m                                    # optional (default: 5m)
+    stream: true                                   # optional (SSE for long-running requests)
 
   backup:
     url: https://backup.example:9999/unwrap
@@ -279,9 +313,9 @@ age-plugin-relay/
 │   ├── errors.go                       # Sentinel errors
 │   ├── recipient.go                    # RelayRecipient, NewRelayRecipient, Wrap
 │   ├── identity.go                     # RelayIdentity, NewRelayIdentity, Unwrap, ResolveRemote
-│   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, HTTP client
+│   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser
 │   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote
-│   ├── relay_test.go                   # 7 unit tests
+│   ├── relay_test.go                   # 9 unit tests (incl. SSE)
 │   ├── integration_test.go             # 6 integration tests (mock relay, config, errors)
 │   └── e2e_test.go                     # 2 E2E tests (real binaries, full user flow)
 ├── cmd/
@@ -316,6 +350,8 @@ go test -v ./relay/
 | `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, inner type `X25519` |
 | `TestEndToEndWithMockRelay` | Full flow: generate key pair, wrap via relay, mock HTTP server unwraps, file key matches |
 | `TestUnwrapNoMatchingStanza` | Non-matching stanzas return `age.ErrIncorrectIdentity` |
+| `TestEndToEndWithSSERelay` | Full wrap/unwrap flow over SSE (heartbeat + result event) |
+| `TestSSERelayError` | Error event from SSE relay (wrong identity) |
 
 ### Integration tests
 
