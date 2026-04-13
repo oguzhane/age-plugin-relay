@@ -3,16 +3,20 @@
 //
 // Usage:
 //
-//	relay-server -identity keys.txt [-addr :9876]
+//	relay-server -identity keys.txt [-addr :9876] [-tls-cert cert.pem -tls-key key.pem] [-tls-ca ca.pem] [-auth-token TOKEN]
 package main
 
 import (
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"filippo.io/age"
 
@@ -22,6 +26,10 @@ import (
 func main() {
 	identityFile := ""
 	addr := ":9876"
+	tlsCert := ""
+	tlsKey := ""
+	tlsCA := ""
+	authToken := ""
 
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -35,14 +43,44 @@ func main() {
 			if i < len(os.Args) {
 				addr = os.Args[i]
 			}
+		case "-tls-cert":
+			i++
+			if i < len(os.Args) {
+				tlsCert = os.Args[i]
+			}
+		case "-tls-key":
+			i++
+			if i < len(os.Args) {
+				tlsKey = os.Args[i]
+			}
+		case "-tls-ca":
+			i++
+			if i < len(os.Args) {
+				tlsCA = os.Args[i]
+			}
+		case "-auth-token":
+			i++
+			if i < len(os.Args) {
+				authToken = os.Args[i]
+			}
 		}
 	}
 
 	if identityFile == "" {
-		fmt.Fprintf(os.Stderr, "Usage: relay-server -identity <file> [-addr :9876]\n")
+		fmt.Fprintf(os.Stderr, "Usage: relay-server -identity <file> [-addr :9876] [options]\n")
 		fmt.Fprintf(os.Stderr, "\nMinimal relay server for age-plugin-relay.\n")
 		fmt.Fprintf(os.Stderr, "Serves POST /unwrap — receives age stanzas, unwraps with local identity, returns file key.\n")
+		fmt.Fprintf(os.Stderr, "\nOptions:\n")
+		fmt.Fprintf(os.Stderr, "  -tls-cert <file>    TLS server certificate (enables HTTPS)\n")
+		fmt.Fprintf(os.Stderr, "  -tls-key <file>     TLS server private key (required with -tls-cert)\n")
+		fmt.Fprintf(os.Stderr, "  -tls-ca <file>      CA certificate for client verification (enables mTLS)\n")
+		fmt.Fprintf(os.Stderr, "  -auth-token <token>  Required Bearer token for all requests\n")
 		os.Exit(1)
+	}
+
+	// Auth token from flag or env.
+	if authToken == "" {
+		authToken = os.Getenv("RELAY_AUTH_TOKEN")
 	}
 
 	identities, err := loadIdentities(identityFile)
@@ -56,6 +94,15 @@ func main() {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, relay.RelayResponse{Error: "method not allowed"})
 			return
+		}
+
+		// Auth token check.
+		if authToken != "" {
+			provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(authToken)) != 1 {
+				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "unauthorized"})
+				return
+			}
 		}
 
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
@@ -74,7 +121,12 @@ func main() {
 		if len(req.Stanzas) > 0 {
 			fmt.Fprintf(os.Stderr, ", type=%s", req.Stanzas[0].Type)
 		}
-		fmt.Fprintf(os.Stderr, ", action=%s, stream=%v\n", req.Action, req.Stream)
+		fmt.Fprintf(os.Stderr, ", action=%s, stream=%v, version=%d\n", req.Action, req.Stream, req.Version)
+
+		if req.Version != 1 {
+			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: fmt.Sprintf("unsupported protocol version: %d", req.Version)})
+			return
+		}
 
 		if req.Action != "unwrap" {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "unsupported action: " + req.Action})
@@ -120,10 +172,46 @@ func main() {
 		}
 	})
 
-	fmt.Fprintf(os.Stderr, "[relay-server] Listening on %s\n", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	useTLS := tlsCert != "" && tlsKey != ""
+	if useTLS {
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+
+		// If CA is provided, require and verify client certs (mTLS).
+		if tlsCA != "" {
+			caCert, err := os.ReadFile(tlsCA)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading CA cert: %v\n", err)
+				os.Exit(1)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caCert) {
+				fmt.Fprintf(os.Stderr, "Error: no valid certs found in CA file %s\n", tlsCA)
+				os.Exit(1)
+			}
+			tlsConfig.ClientCAs = pool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			fmt.Fprintf(os.Stderr, "[relay-server] mTLS enabled (client certs required)\n")
+		}
+
+		server := &http.Server{
+			Addr:      addr,
+			TLSConfig: tlsConfig,
+		}
+		fmt.Fprintf(os.Stderr, "[relay-server] Listening on %s (TLS)\n", addr)
+		if err := server.ListenAndServeTLS(tlsCert, tlsKey); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[relay-server] WARNING: TLS not configured — file keys will be transmitted in plaintext!\n")
+		fmt.Fprintf(os.Stderr, "[relay-server] Use -tls-cert and -tls-key for production deployments.\n")
+		fmt.Fprintf(os.Stderr, "[relay-server] Listening on %s (plaintext HTTP)\n", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 

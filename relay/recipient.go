@@ -13,7 +13,7 @@ import (
 type RelayRecipient struct {
 	inner    age.Recipient
 	innerStr string
-	tag      [4]byte
+	tag      [TagSize]byte
 }
 
 // NewRelayRecipient creates a RelayRecipient from the raw Bech32 data payload

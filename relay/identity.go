@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
 
 	"filippo.io/age"
@@ -12,7 +13,7 @@ import (
 // RelayIdentity matches relay stanzas by tag and forwards them to a relay URL
 // for unwrapping by a remote identity.
 type RelayIdentity struct {
-	Tag    [4]byte
+	Tag    [TagSize]byte
 	Remote RemoteConfig
 }
 
@@ -40,6 +41,9 @@ func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
 // If it's a URL, wrap it directly. Otherwise, look it up in the config file.
 func ResolveRemote(target string) (RemoteConfig, error) {
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		if strings.HasPrefix(target, "http://") {
+			fmt.Fprintf(os.Stderr, "WARNING: relay URL uses plaintext HTTP — file keys will be transmitted unencrypted\n")
+		}
 		return RemoteConfig{URL: target}, nil
 	}
 
@@ -60,7 +64,7 @@ func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 			continue
 		}
 		stanzaTagBytes, err := base64.RawStdEncoding.DecodeString(s.Args[0])
-		if err != nil || len(stanzaTagBytes) != 4 {
+		if err != nil || len(stanzaTagBytes) != TagSize {
 			continue
 		}
 		if !bytes.Equal(stanzaTagBytes, id.Tag[:]) {
@@ -83,5 +87,11 @@ func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("relay unwrap: %w", err)
 	}
-	return fileKey, nil
+
+	// Copy the file key before it can be reused/leaked by future calls.
+	// The caller (age) takes ownership; we clear our reference.
+	result := make([]byte, len(fileKey))
+	copy(result, fileKey)
+	clear(fileKey)
+	return result, nil
 }

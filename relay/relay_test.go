@@ -49,7 +49,10 @@ func TestEncodeDecodeRecipient(t *testing.T) {
 }
 
 func TestEncodeDecodeIdentity(t *testing.T) {
-	tag := [4]byte{0x01, 0x02, 0x03, 0x04}
+	var tag [TagSize]byte
+	for i := range tag {
+		tag[i] = byte(i + 1)
+	}
 	url := "https://relay.example.com:8443/unwrap"
 
 	encoded := EncodeRelayIdentity(tag, url)
@@ -107,8 +110,8 @@ func TestWrapProducesRelayStanzas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decoding tag: %v", err)
 	}
-	if len(tagBytes) != 4 {
-		t.Fatalf("expected 4-byte tag, got %d", len(tagBytes))
+	if len(tagBytes) != TagSize {
+		t.Fatalf("expected %d-byte tag, got %d", TagSize, len(tagBytes))
 	}
 	if s.Args[1] != "X25519" {
 		t.Fatalf("expected inner type X25519, got %q", s.Args[1])
@@ -160,8 +163,12 @@ func TestEndToEndWithMockRelay(t *testing.T) {
 }
 
 func TestUnwrapNoMatchingStanza(t *testing.T) {
+	var tag [TagSize]byte
+	for i := range tag {
+		tag[i] = 0xFF
+	}
 	id := &RelayIdentity{
-		Tag:    [4]byte{0xFF, 0xFF, 0xFF, 0xFF},
+		Tag:    tag,
 		Remote: RemoteConfig{URL: "http://localhost:1/unused"},
 	}
 

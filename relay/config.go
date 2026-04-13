@@ -23,12 +23,13 @@ type Config struct {
 
 // RemoteConfig holds per-remote relay endpoint settings.
 type RemoteConfig struct {
-	URL     string `yaml:"url"`                // required
-	TLSCert string `yaml:"tls_cert,omitempty"` // optional: client cert for mTLS
-	TLSKey  string `yaml:"tls_key,omitempty"`  // optional: client key for mTLS
-	TLSCA   string `yaml:"tls_ca,omitempty"`   // optional: CA cert for server verification
-	Timeout string `yaml:"timeout,omitempty"`  // optional: Go duration (default: 5m)
-	Stream  bool   `yaml:"stream,omitempty"`   // optional: use SSE for long-running requests
+	URL       string `yaml:"url"`                  // required
+	TLSCert   string `yaml:"tls_cert,omitempty"`   // optional: client cert for mTLS
+	TLSKey    string `yaml:"tls_key,omitempty"`    // optional: client key for mTLS
+	TLSCA     string `yaml:"tls_ca,omitempty"`     // optional: CA cert for server verification
+	Timeout   string `yaml:"timeout,omitempty"`    // optional: Go duration (default: 5m)
+	Stream    bool   `yaml:"stream,omitempty"`     // optional: use SSE for long-running requests
+	AuthToken string `yaml:"auth_token,omitempty"` // optional: Bearer token for relay server auth
 }
 
 // TimeoutDuration parses the timeout string, falling back to DefaultTimeout.

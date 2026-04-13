@@ -62,13 +62,25 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	client := newHTTPClient(remote)
+	client, err := newHTTPClient(remote)
+	if err != nil {
+		return nil, fmt.Errorf("building HTTP client: %w", err)
+	}
 
 	httpReq, err := http.NewRequest("POST", remote.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Add auth token if configured.
+	token := remote.AuthToken
+	if token == "" {
+		token = os.Getenv("AGE_PLUGIN_RELAY_AUTH_TOKEN")
+	}
+	if token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
@@ -94,9 +106,9 @@ func readJSONResponse(resp *http.Response) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		var relayResp RelayResponse
 		if json.Unmarshal(respBody, &relayResp) == nil && relayResp.Error != "" {
-			return nil, fmt.Errorf("relay error (HTTP %d): %s", resp.StatusCode, relayResp.Error)
+			return nil, fmt.Errorf("relay error (HTTP %d): %s", resp.StatusCode, sanitizeErrorMsg(relayResp.Error))
 		}
-		return nil, fmt.Errorf("relay returned HTTP %d: %s", resp.StatusCode, respBody)
+		return nil, fmt.Errorf("relay returned HTTP %d", resp.StatusCode)
 	}
 
 	var relayResp RelayResponse
@@ -104,7 +116,7 @@ func readJSONResponse(resp *http.Response) ([]byte, error) {
 		return nil, fmt.Errorf("decoding relay response: %w", err)
 	}
 	if relayResp.Error != "" {
-		return nil, fmt.Errorf("relay error: %s", relayResp.Error)
+		return nil, fmt.Errorf("relay error: %s", sanitizeErrorMsg(relayResp.Error))
 	}
 
 	fileKey, err := base64.RawStdEncoding.DecodeString(relayResp.FileKey)
@@ -117,6 +129,9 @@ func readJSONResponse(resp *http.Response) ([]byte, error) {
 // readSSEResponse parses a Server-Sent Events stream, looking for a "result"
 // or "error" event. Heartbeat comments and unknown events are ignored.
 //
+// The total bytes read are limited to 1MB to prevent resource exhaustion from
+// a malicious or misbehaving relay server.
+//
 // SSE format (per https://html.spec.whatwg.org/multipage/server-sent-events.html):
 //
 //	event: result
@@ -127,7 +142,9 @@ func readJSONResponse(resp *http.Response) ([]byte, error) {
 //
 //	: heartbeat (comment, ignored)
 func readSSEResponse(r io.Reader) ([]byte, error) {
-	scanner := bufio.NewScanner(r)
+	const maxSSEBytes = 1 << 20 // 1MB
+	limited := io.LimitReader(r, maxSSEBytes)
+	scanner := bufio.NewScanner(limited)
 
 	var eventType string
 	var dataBuf strings.Builder
@@ -194,7 +211,7 @@ func handleSSEEvent(eventType, data string) ([]byte, bool, error) {
 			return nil, false, fmt.Errorf("decoding SSE result: %w", err)
 		}
 		if resp.Error != "" {
-			return nil, true, fmt.Errorf("relay error: %s", resp.Error)
+			return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
 		}
 		fileKey, err := base64.RawStdEncoding.DecodeString(resp.FileKey)
 		if err != nil {
@@ -205,9 +222,9 @@ func handleSSEEvent(eventType, data string) ([]byte, bool, error) {
 	case "error":
 		var resp RelayResponse
 		if err := json.Unmarshal([]byte(data), &resp); err != nil {
-			return nil, true, fmt.Errorf("relay SSE error (unparseable): %s", data)
+			return nil, true, fmt.Errorf("relay SSE error (unparseable)")
 		}
-		return nil, true, fmt.Errorf("relay error: %s", resp.Error)
+		return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
 
 	default:
 		// Unknown event type — ignore (forward compat).
@@ -217,7 +234,8 @@ func handleSSEEvent(eventType, data string) ([]byte, bool, error) {
 
 // newHTTPClient builds an HTTP client from a RemoteConfig.
 // Per-remote settings take priority; env vars are used as fallback.
-func newHTTPClient(remote RemoteConfig) *http.Client {
+// Returns an error if configured TLS files cannot be loaded (fail-closed).
+func newHTTPClient(remote RemoteConfig) (*http.Client, error) {
 	timeout := remote.TimeoutDuration()
 	if v := os.Getenv("AGE_PLUGIN_RELAY_TIMEOUT"); v != "" && remote.Timeout == "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -226,7 +244,9 @@ func newHTTPClient(remote RemoteConfig) *http.Client {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	tlsConfig := &tls.Config{}
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 
 	certFile := remote.TLSCert
 	keyFile := remote.TLSKey
@@ -238,9 +258,10 @@ func newHTTPClient(remote RemoteConfig) *http.Client {
 	}
 	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err == nil {
-			tlsConfig.Certificates = []tls.Certificate{cert}
+		if err != nil {
+			return nil, fmt.Errorf("loading TLS client cert/key (%s, %s): %w", certFile, keyFile, err)
 		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
 	}
 
 	caFile := remote.TLSCA
@@ -249,11 +270,14 @@ func newHTTPClient(remote RemoteConfig) *http.Client {
 	}
 	if caFile != "" {
 		caCert, err := os.ReadFile(caFile)
-		if err == nil {
-			pool := x509.NewCertPool()
-			pool.AppendCertsFromPEM(caCert)
-			tlsConfig.RootCAs = pool
+		if err != nil {
+			return nil, fmt.Errorf("reading TLS CA file %s: %w", caFile, err)
 		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("no valid certs found in CA file %s", caFile)
+		}
+		tlsConfig.RootCAs = pool
 	}
 
 	transport.TLSClientConfig = tlsConfig
@@ -261,5 +285,21 @@ func newHTTPClient(remote RemoteConfig) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+	}, nil
+}
+
+// sanitizeErrorMsg truncates and cleans an error message from the relay server
+// to prevent information leakage or injection via crafted error strings.
+func sanitizeErrorMsg(msg string) string {
+	const maxLen = 256
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "..."
 	}
+	// Strip control characters except space/tab/newline.
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' && r != '\n' {
+			return -1
+		}
+		return r
+	}, msg)
 }
