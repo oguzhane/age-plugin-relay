@@ -220,6 +220,90 @@ func TestE2ESSEStream(t *testing.T) {
 	}
 }
 
+// TestE2EEnvelopeEncryption exercises the full user flow with HMAC signing
+// and ephemeral X25519 response encryption via relay-config.yaml.
+func TestE2EEnvelopeEncryption(t *testing.T) {
+	ageBin, ageKeygenBin, pluginBin, relayServerBin := buildAll(t)
+	tmpDir := t.TempDir()
+
+	// ── Step 1: Generate remote key pair ────────────────────────────────
+	remoteKeyFile := filepath.Join(tmpDir, "remote.key")
+	run(t, ageKeygenBin, "-o", remoteKeyFile)
+	remotePubKey := extractPublicKey(t, remoteKeyFile)
+	t.Logf("Remote public key: %s", remotePubKey)
+
+	// ── Step 2: Start relay-server with HMAC key ────────────────────────
+	port := freePort(t)
+	relayURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	hmacSecret := "e2e-envelope-secret-42"
+
+	relayCmd := exec.Command(relayServerBin,
+		"-identity", remoteKeyFile,
+		"-addr", fmt.Sprintf(":%d", port),
+		"-hmac-key", hmacSecret,
+	)
+	relayCmd.Stderr = os.Stderr
+	if err := relayCmd.Start(); err != nil {
+		t.Fatalf("starting relay-server: %v", err)
+	}
+	t.Cleanup(func() { relayCmd.Process.Kill(); relayCmd.Wait() })
+	waitForServer(t, port)
+	t.Logf("Relay server listening on :%d (HMAC enabled)", port)
+
+	// ── Step 3: Write config with hmac_key + encrypted_response ─────────
+	configFile := filepath.Join(tmpDir, "relay-config.yaml")
+	configContent := fmt.Sprintf(
+		"remotes:\n  secure:\n    url: %s\n    hmac_key: %s\n    encrypted_response: true\n    timeout: 30s\n",
+		relayURL, hmacSecret,
+	)
+	os.WriteFile(configFile, []byte(configContent), 0644)
+	t.Logf("Config:\n%s", configContent)
+
+	// ── Step 4: Generate with --remote ──────────────────────────────────
+	genCmd := exec.Command(pluginBin, "--generate", "--inner-recipient", remotePubKey, "--remote", "secure")
+	genCmd.Env = append(os.Environ(), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
+	genOutBytes, err := genCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--generate --remote: %v\n%s", err, genOutBytes)
+	}
+	genOut := string(genOutBytes)
+
+	relayRecipient := extractLine(t, genOut, "age1relay1")
+	relayIdentityStr := extractLine(t, genOut, "AGE-PLUGIN-RELAY-1")
+	t.Logf("Relay recipient: %s", truncate(relayRecipient, 50))
+	t.Logf("Relay identity:  %s", truncate(relayIdentityStr, 50))
+
+	identityFile := filepath.Join(tmpDir, "relay-identity.txt")
+	os.WriteFile(identityFile, []byte(relayIdentityStr+"\n"), 0600)
+
+	// ── Step 5: Encrypt ─────────────────────────────────────────────────
+	plaintext := "E2E envelope: HMAC signed + encrypted response — " + time.Now().Format(time.RFC3339Nano)
+	ciphertextFile := filepath.Join(tmpDir, "secret.age")
+
+	encCmd := exec.Command(ageBin, "-r", relayRecipient, "-o", ciphertextFile)
+	encCmd.Stdin = strings.NewReader(plaintext)
+	encCmd.Env = pluginEnv(pluginBin)
+	if out, err := encCmd.CombinedOutput(); err != nil {
+		t.Fatalf("encrypt: %v\n%s", err, out)
+	}
+	t.Logf("Encrypted %d bytes", fileSize(t, ciphertextFile))
+
+	// ── Step 6: Decrypt (HMAC + envelope path) ──────────────────────────
+	decCmd := exec.Command(ageBin, "-d", "-i", identityFile, ciphertextFile)
+	decCmd.Env = append(pluginEnv(pluginBin), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
+	decOutBytes, err := decCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("decrypt (envelope): %v\n%s", err, decOutBytes)
+	}
+	decrypted := strings.TrimRight(string(decOutBytes), "\n")
+	t.Logf("Decrypted via envelope: %q", decrypted)
+
+	// ── Step 7: Verify ──────────────────────────────────────────────────
+	if decrypted != plaintext {
+		t.Fatalf("plaintext mismatch:\n  want: %q\n  got:  %q", plaintext, decrypted)
+	}
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 func buildAll(t *testing.T) (ageBin, ageKeygenBin, pluginBin, relayServerBin string) {

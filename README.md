@@ -221,6 +221,14 @@ Content-Type: application/json
 
 `file_key` is the 16-byte age file key, base64 raw standard encoded.
 
+When [encrypted response](#encrypted-response-ephemeral-x25519) is active, the server returns `encrypted_file_key` instead:
+
+```json
+{
+  "encrypted_file_key": "<base64: serverPub(32) || nonce(24) || NaCl box ciphertext>"
+}
+```
+
 **Errors:**
 
 | HTTP Status | Body | Meaning |
@@ -276,6 +284,7 @@ remotes:
     stream: true                                   # optional (SSE for long-running requests)
     auth_token: my-bearer-token                    # optional (Bearer token for simple auth)
     hmac_key: my-shared-secret                     # optional (HMAC-SHA256 request signing)
+    encrypted_response: true                       # optional (ephemeral X25519 response encryption)
 
   backup:
     url: https://backup.example:9999/unwrap
@@ -320,8 +329,10 @@ age-plugin-relay/
 │   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser
 │   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote
 │   ├── hmac.go                         # HMAC-SHA256 request signing and verification
-│   ├── relay_test.go                   # Unit tests (mock relay, SSE, HMAC)
+│   ├── envelope.go                     # Ephemeral X25519 response encryption (NaCl box)
+│   ├── relay_test.go                   # Unit tests (mock relay, SSE, HMAC, envelope)
 │   ├── hmac_test.go                    # HMAC signing unit tests
+│   ├── envelope_test.go                # Envelope seal/open unit tests
 │   ├── integration_test.go             # Integration tests (mock relay, config, errors)
 │   └── e2e_test.go                     # E2E tests (real binaries, full user flow)
 ├── cmd/
@@ -337,6 +348,7 @@ age-plugin-relay/
 
 - [`filippo.io/age`](https://pkg.go.dev/filippo.io/age) v1.3.1 — age types (`Recipient`, `Identity`, `Stanza`), recipient parsing
 - [`filippo.io/age/plugin`](https://pkg.go.dev/filippo.io/age/plugin) — Plugin framework, Bech32 encoding helpers
+- [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — X25519 and NaCl box for ephemeral response encryption
 - [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) — Config file parsing
 
 ## Testing
@@ -366,6 +378,13 @@ go test -v ./relay/
 | `TestVerifyTamperedBody` | HMAC rejects tampered payload |
 | `TestValidateTimestamp` | Timestamp within/outside 5m window |
 | `TestNoncesAreUnique` | 100 nonces are all distinct |
+| `TestEndToEndWithEnvelopeEncryption` | Full wrap/unwrap with HMAC + encrypted response |
+| `TestEnvelopeRejectsSwappedEphemeralKey` | MITM swapping ephemeral key is rejected by HMAC |
+| `TestSealOpenFileKey` | Envelope seal/open round-trip |
+| `TestOpenWrongKey` | Envelope rejects wrong private key |
+| `TestOpenTruncated` | Envelope rejects truncated sealed data |
+| `TestSealDifferentEachTime` | Two seals of same file key produce different ciphertext |
+| `TestEphemeralClear` | Private key is zeroed after Clear() |
 
 ### Integration tests
 
@@ -432,7 +451,7 @@ Server: `relay-server -identity keys.txt -auth-token my-secret-token`
 
 ### HMAC-SHA256 Signing (recommended)
 
-Each request is signed with HMAC-SHA256 over `timestamp.nonce.body`. Provides authentication **and** replay protection.
+Each request is signed with HMAC-SHA256 over `timestamp.nonce.[ephemeral_key.]body`. Provides authentication **and** replay protection.
 
 ```yaml
 # relay-config.yaml
@@ -450,11 +469,80 @@ The client attaches three headers to every request:
 |---|---|
 | `X-Relay-Timestamp` | Unix timestamp (seconds) |
 | `X-Relay-Nonce` | 16-byte random hex |
-| `X-Relay-Signature` | `HMAC-SHA256(key, "{timestamp}.{nonce}.{body}")` hex |
+| `X-Relay-Signature` | `HMAC-SHA256(key, "{timestamp}.{nonce}.[{ephemeral_key}.]body")` hex |
+
+When [encrypted response](#encrypted-response-ephemeral-x25519) is active, the client's ephemeral public key is included in the signed string (`timestamp.nonce.ephemeral_key.body`) to prevent key substitution attacks.
 
 The server verifies the signature, rejects timestamps outside a 5-minute window, and rejects duplicate nonces.
 
 Both mechanisms can be used together (Bearer is checked first, then HMAC).
+
+### Encrypted Response (Ephemeral X25519)
+
+When `encrypted_response: true` is set, the file key in the server's response is encrypted using an ephemeral X25519 key exchange. This provides **end-to-end payload encryption** independent of TLS — the file key is never plaintext on the wire, even if TLS is stripped, terminated by a proxy, or compromised.
+
+**Requires `hmac_key`** — without HMAC signing, the ephemeral public key header cannot be authenticated, making it vulnerable to key substitution attacks.
+
+```yaml
+remotes:
+  myserver:
+    url: https://relay.example:8443/unwrap
+    hmac_key: my-shared-secret
+    encrypted_response: true
+```
+
+#### How it works
+
+```
+Client                              Network                Server
+──────                              ───────                ──────
+1. Generate ephemeral X25519 keypair
+2. Sign(hmac_key, ts.nonce.eph_pub.body)
+   ├─ X-Relay-Ephemeral-Key: <pub>  ────────►
+   ├─ X-Relay-Signature: <hmac>     ────────►
+   └─ body (already age-encrypted)  ────────►
+                                                    3. Verify HMAC (incl. eph key)
+                                                    4. Unwrap stanzas → file key
+                                                    5. Generate server ephemeral keypair
+                                                    6. NaCl box.Seal(file_key, client_pub)
+                                        ◄────────  {"encrypted_file_key": "..."}
+7. NaCl box.Open(sealed, server_pub, client_priv)
+8. Discard ephemeral keypair
+```
+
+#### Wire format
+
+The `encrypted_file_key` field contains base64-encoded:
+
+```
+serverPub (32 bytes) || nonce (24 bytes) || NaCl box ciphertext (16 + 16 bytes)
+```
+
+Total: 88 bytes raw, ~118 bytes base64.
+
+| Component | Size | Description |
+|---|---|---|
+| Server public key | 32 bytes | One-time X25519 public key generated per response |
+| Nonce | 24 bytes | Random XSalsa20-Poly1305 nonce |
+| Ciphertext | 32 bytes | 16-byte file key + 16-byte Poly1305 tag |
+
+#### Security properties
+
+- **Transport-independent** — file key is encrypted end-to-end even over plaintext HTTP
+- **Forward secrecy** — both client and server ephemeral keys are unique per request and discarded after use
+- **Key substitution protection** — ephemeral public key is included in the HMAC signature; swapping it invalidates the signature
+- **No pre-shared encryption key** — uses X25519 key agreement (NaCl box = X25519 + XSalsa20-Poly1305)
+- **Works with SSE** — streaming responses also use `encrypted_file_key` when the ephemeral key header is present
+
+#### Cryptographic construction
+
+Uses Go's `golang.org/x/crypto/nacl/box` (NaCl `crypto_box`):
+
+1. **Client** calls `box.GenerateKey()` → ephemeral X25519 keypair
+2. **Server** calls `box.GenerateKey()` → one-time server keypair, then `box.Seal(fileKey, nonce, clientPub, serverPriv)`
+3. **Client** calls `box.Open(ciphertext, nonce, serverPub, clientPriv)`
+
+The server's one-time keypair ensures the sealed box is unique even for identical file keys (defense against deterministic ciphertext analysis).
 
 ## Relay Server
 
@@ -496,6 +584,7 @@ Flags and environment variables:
 - **No secrets in the plugin** — the recipient contains only a public key string; the identity contains only a tag and URL.
 - **File key (16 bytes) travels over HTTPS** — use TLS/mTLS for transport security.
 - **HMAC request signing** — prevents replay attacks and authenticates requests (optional, recommended).
+- **Encrypted responses** — ephemeral X25519 encrypts the file key end-to-end, independent of TLS (optional, requires HMAC).
 - **With SOPS key groups + Shamir** — intercepting one group's unwrapped share is information-theoretically useless without the other share(s).
 - **Relay endpoint is the trust boundary** — it holds the actual private key or identity. The plugin itself holds no key material.
 
@@ -504,7 +593,9 @@ Flags and environment variables:
 | Scenario | Impact |
 |---|---|
 | Plugin binary compromised | Attacker could redirect relay URL, but still needs the remote identity to unwrap |
-| Relay URL intercepted (no TLS) | Attacker sees encrypted stanzas (useless without identity) and file key (one Shamir share if using key groups) |
+| Relay URL intercepted (no TLS) | Attacker sees encrypted stanzas (useless without identity) and file key (one Shamir share if using key groups). With `encrypted_response`, file key is also encrypted. |
+| TLS-terminating proxy in path | File key visible between proxy and backend. With `encrypted_response`, file key remains encrypted end-to-end. |
 | mTLS cert stolen | Attacker can talk to relay, but relay still requires the actual identity to unwrap |
+| HMAC key compromised | Attacker can forge requests and replay. Does NOT compromise `encrypted_response` — ephemeral X25519 key agreement is independent of the HMAC key. |
 | Relay endpoint compromised | Attacker gets file keys — mitigated by using SOPS key groups (need both shares) |
 | Both relay + server compromised | Need physical access to all identity holders (geographic separation with YubiKeys) |

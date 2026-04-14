@@ -24,9 +24,11 @@ const (
 	HMACMaxDrift = 5 * time.Minute
 )
 
-// SignRequest computes HMAC-SHA256 over "timestamp.nonce.body" and returns
-// the three header values (timestamp, nonce, signature hex).
-func SignRequest(key []byte, body []byte) (timestamp, nonce, signature string, err error) {
+// SignRequest computes HMAC-SHA256 over "timestamp.nonce.[ephemeralKey.]body"
+// and returns the three header values (timestamp, nonce, signature hex).
+// If ephemeralKey is non-empty it is included in the signed string to prevent
+// key substitution attacks on encrypted responses.
+func SignRequest(key []byte, body []byte, ephemeralKey ...string) (timestamp, nonce, signature string, err error) {
 	var nonceBuf [16]byte
 	if _, err := rand.Read(nonceBuf[:]); err != nil {
 		return "", "", "", fmt.Errorf("generating nonce: %w", err)
@@ -40,6 +42,10 @@ func SignRequest(key []byte, body []byte) (timestamp, nonce, signature string, e
 	mac.Write([]byte("."))
 	mac.Write([]byte(nonce))
 	mac.Write([]byte("."))
+	if len(ephemeralKey) > 0 && ephemeralKey[0] != "" {
+		mac.Write([]byte(ephemeralKey[0]))
+		mac.Write([]byte("."))
+	}
 	mac.Write(body)
 	signature = hex.EncodeToString(mac.Sum(nil))
 
@@ -47,13 +53,18 @@ func SignRequest(key []byte, body []byte) (timestamp, nonce, signature string, e
 }
 
 // VerifySignature recomputes the HMAC and compares in constant time.
+// If ephemeralKey is non-empty it is included in the signed string.
 // Returns nil on success.
-func VerifySignature(key []byte, timestamp, nonce string, body []byte, signature string) error {
+func VerifySignature(key []byte, timestamp, nonce string, body []byte, signature string, ephemeralKey ...string) error {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(timestamp))
 	mac.Write([]byte("."))
 	mac.Write([]byte(nonce))
 	mac.Write([]byte("."))
+	if len(ephemeralKey) > 0 && ephemeralKey[0] != "" {
+		mac.Write([]byte(ephemeralKey[0]))
+		mac.Write([]byte("."))
+	}
 	mac.Write(body)
 
 	expected := mac.Sum(nil)

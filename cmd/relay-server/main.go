@@ -151,6 +151,7 @@ func main() {
 			sig := r.Header.Get(relay.HMACHeaderSignature)
 			ts := r.Header.Get(relay.HMACHeaderTimestamp)
 			nonce := r.Header.Get(relay.HMACHeaderNonce)
+			ephKey := r.Header.Get(relay.EnvelopeHeader)
 			if sig == "" || ts == "" || nonce == "" {
 				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "missing HMAC signature headers"})
 				return
@@ -159,7 +160,7 @@ func main() {
 				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: " + err.Error()})
 				return
 			}
-			if err := relay.VerifySignature([]byte(hmacKey), ts, nonce, body, sig); err != nil {
+			if err := relay.VerifySignature([]byte(hmacKey), ts, nonce, body, sig, ephKey); err != nil {
 				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: " + err.Error()})
 				return
 			}
@@ -216,12 +217,33 @@ func main() {
 			fileKey, err := id.Unwrap(stanzas)
 			if err == nil {
 				fmt.Fprintf(os.Stderr, "[relay-server] Unwrap succeeded, returning file key\n")
-				fk := base64.RawStdEncoding.EncodeToString(fileKey)
+
+				resp := relay.RelayResponse{}
+				ephKeyB64 := r.Header.Get(relay.EnvelopeHeader)
+				if ephKeyB64 != "" {
+					// Encrypt the file key to the client's ephemeral public key.
+					ephKeyBytes, err := base64.RawStdEncoding.DecodeString(ephKeyB64)
+					if err != nil || len(ephKeyBytes) != 32 {
+						writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "invalid ephemeral key"})
+						return
+					}
+					var clientPub [32]byte
+					copy(clientPub[:], ephKeyBytes)
+					sealed, err := relay.SealFileKey(fileKey, clientPub)
+					if err != nil {
+						writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "sealing file key"})
+						return
+					}
+					resp.EncryptedFileKey = sealed
+					clear(fileKey)
+				} else {
+					resp.FileKey = base64.RawStdEncoding.EncodeToString(fileKey)
+				}
 
 				if req.Stream {
-					writeSSE(w, "result", relay.RelayResponse{FileKey: fk})
+					writeSSE(w, "result", resp)
 				} else {
-					writeJSON(w, http.StatusOK, relay.RelayResponse{FileKey: fk})
+					writeJSON(w, http.StatusOK, resp)
 				}
 				return
 			}

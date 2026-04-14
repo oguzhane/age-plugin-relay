@@ -23,14 +23,15 @@ type Config struct {
 
 // RemoteConfig holds per-remote relay endpoint settings.
 type RemoteConfig struct {
-	URL       string `yaml:"url"`                  // required
-	TLSCert   string `yaml:"tls_cert,omitempty"`   // optional: client cert for mTLS
-	TLSKey    string `yaml:"tls_key,omitempty"`    // optional: client key for mTLS
-	TLSCA     string `yaml:"tls_ca,omitempty"`     // optional: CA cert for server verification
-	Timeout   string `yaml:"timeout,omitempty"`    // optional: Go duration (default: 5m)
-	Stream    bool   `yaml:"stream,omitempty"`     // optional: use SSE for long-running requests
-	AuthToken string `yaml:"auth_token,omitempty"` // optional: Bearer token for relay server auth
-	HMACKey   string `yaml:"hmac_key,omitempty"`   // optional: HMAC-SHA256 shared key for request signing + replay protection
+	URL               string `yaml:"url"`                          // required
+	TLSCert           string `yaml:"tls_cert,omitempty"`           // optional: client cert for mTLS
+	TLSKey            string `yaml:"tls_key,omitempty"`            // optional: client key for mTLS
+	TLSCA             string `yaml:"tls_ca,omitempty"`             // optional: CA cert for server verification
+	Timeout           string `yaml:"timeout,omitempty"`            // optional: Go duration (default: 5m)
+	Stream            bool   `yaml:"stream,omitempty"`             // optional: use SSE for long-running requests
+	AuthToken         string `yaml:"auth_token,omitempty"`         // optional: Bearer token for relay server auth
+	HMACKey           string `yaml:"hmac_key,omitempty"`           // optional: HMAC-SHA256 shared key for request signing + replay protection
+	EncryptedResponse bool   `yaml:"encrypted_response,omitempty"` // optional: encrypt file key response with ephemeral X25519 (requires hmac_key)
 }
 
 // TimeoutDuration parses the timeout string, falling back to DefaultTimeout.

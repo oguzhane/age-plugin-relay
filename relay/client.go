@@ -35,8 +35,9 @@ type RelayStanza struct {
 // RelayResponse is the JSON response from the relay endpoint.
 // Used for both standard JSON responses and SSE event data.
 type RelayResponse struct {
-	FileKey string `json:"file_key,omitempty"` // base64 raw standard encoding
-	Error   string `json:"error,omitempty"`
+	FileKey          string `json:"file_key,omitempty"`           // base64 raw standard encoding (plaintext)
+	EncryptedFileKey string `json:"encrypted_file_key,omitempty"` // base64 sealed box (when envelope encryption is active)
+	Error            string `json:"error,omitempty"`
 }
 
 // PostToRelay sends inner stanzas to the relay URL and returns the unwrapped file key.
@@ -82,13 +83,26 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
 
+	// Ephemeral response encryption (optional, requires hmac_key).
+	var ephemeral *EphemeralKeypair
+	var ephemeralB64 string
+	if remote.EncryptedResponse {
+		ephemeral, err = GenerateEphemeral()
+		if err != nil {
+			return nil, fmt.Errorf("generating ephemeral key: %w", err)
+		}
+		defer ephemeral.Clear()
+		ephemeralB64 = base64.RawStdEncoding.EncodeToString(ephemeral.PublicKey[:])
+		httpReq.Header.Set(EnvelopeHeader, ephemeralB64)
+	}
+
 	// HMAC request signing (optional).
 	hmacKey := remote.HMACKey
 	if hmacKey == "" {
 		hmacKey = os.Getenv("AGE_PLUGIN_RELAY_HMAC_KEY")
 	}
 	if hmacKey != "" {
-		ts, nonce, sig, err := SignRequest([]byte(hmacKey), body)
+		ts, nonce, sig, err := SignRequest([]byte(hmacKey), body, ephemeralB64)
 		if err != nil {
 			return nil, fmt.Errorf("signing request: %w", err)
 		}
@@ -105,14 +119,21 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 
 	// Dispatch based on response content type.
 	ct := resp.Header.Get("Content-Type")
+	var fileKey []byte
 	if strings.HasPrefix(ct, "text/event-stream") {
-		return readSSEResponse(resp.Body)
+		fileKey, err = readSSEResponse(resp.Body, ephemeral)
+	} else {
+		fileKey, err = readJSONResponse(resp, ephemeral)
 	}
-	return readJSONResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	return fileKey, nil
 }
 
 // readJSONResponse handles standard JSON responses (non-streaming).
-func readJSONResponse(resp *http.Response) ([]byte, error) {
+// If ephemeral is non-nil, the response may contain encrypted_file_key instead of file_key.
+func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair) ([]byte, error) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
 		return nil, fmt.Errorf("reading relay response: %w", err)
@@ -134,7 +155,19 @@ func readJSONResponse(resp *http.Response) ([]byte, error) {
 		return nil, fmt.Errorf("relay error: %s", sanitizeErrorMsg(relayResp.Error))
 	}
 
-	fileKey, err := base64.RawStdEncoding.DecodeString(relayResp.FileKey)
+	return extractFileKey(relayResp, ephemeral)
+}
+
+// extractFileKey returns the file key from a RelayResponse, handling both
+// plaintext (file_key) and encrypted (encrypted_file_key) forms.
+func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair) ([]byte, error) {
+	if resp.EncryptedFileKey != "" && ephemeral != nil {
+		return OpenFileKey(resp.EncryptedFileKey, ephemeral.PrivateKey)
+	}
+	if resp.FileKey == "" {
+		return nil, fmt.Errorf("relay response contains no file key")
+	}
+	fileKey, err := base64.RawStdEncoding.DecodeString(resp.FileKey)
 	if err != nil {
 		return nil, fmt.Errorf("decoding file key: %w", err)
 	}
@@ -156,7 +189,7 @@ func readJSONResponse(resp *http.Response) ([]byte, error) {
 //	data: {"error": "..."}
 //
 //	: heartbeat (comment, ignored)
-func readSSEResponse(r io.Reader) ([]byte, error) {
+func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair) ([]byte, error) {
 	const maxSSEBytes = 1 << 20 // 1MB
 	limited := io.LimitReader(r, maxSSEBytes)
 	scanner := bufio.NewScanner(limited)
@@ -175,7 +208,7 @@ func readSSEResponse(r io.Reader) ([]byte, error) {
 		// Empty line = end of event.
 		if line == "" {
 			if eventType != "" && dataBuf.Len() > 0 {
-				result, done, err := handleSSEEvent(eventType, dataBuf.String())
+				result, done, err := handleSSEEvent(eventType, dataBuf.String(), ephemeral)
 				if err != nil {
 					return nil, err
 				}
@@ -205,7 +238,7 @@ func readSSEResponse(r io.Reader) ([]byte, error) {
 
 	// Stream ended without a result or error event.
 	if eventType != "" && dataBuf.Len() > 0 {
-		result, _, err := handleSSEEvent(eventType, dataBuf.String())
+		result, _, err := handleSSEEvent(eventType, dataBuf.String(), ephemeral)
 		if err != nil {
 			return nil, err
 		}
@@ -218,7 +251,7 @@ func readSSEResponse(r io.Reader) ([]byte, error) {
 }
 
 // handleSSEEvent processes a single SSE event. Returns (fileKey, done, error).
-func handleSSEEvent(eventType, data string) ([]byte, bool, error) {
+func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair) ([]byte, bool, error) {
 	switch eventType {
 	case "result":
 		var resp RelayResponse
@@ -228,9 +261,9 @@ func handleSSEEvent(eventType, data string) ([]byte, bool, error) {
 		if resp.Error != "" {
 			return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
 		}
-		fileKey, err := base64.RawStdEncoding.DecodeString(resp.FileKey)
+		fileKey, err := extractFileKey(resp, ephemeral)
 		if err != nil {
-			return nil, false, fmt.Errorf("decoding file key from SSE: %w", err)
+			return nil, false, fmt.Errorf("extracting file key from SSE: %w", err)
 		}
 		return fileKey, true, nil
 
