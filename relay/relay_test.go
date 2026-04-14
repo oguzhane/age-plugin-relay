@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -328,4 +329,154 @@ func TestSSERelayError(t *testing.T) {
 		t.Fatal("expected error from SSE relay with wrong identity")
 	}
 	t.Logf("Got expected SSE error: %v", err)
+}
+
+// newMockHMACRelayServer starts an httptest server that verifies HMAC signatures
+// before unwrapping stanzas.
+func newMockHMACRelayServer(t *testing.T, identity *age.X25519Identity, hmacKey string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+
+		// Verify HMAC.
+		sig := r.Header.Get(HMACHeaderSignature)
+		ts := r.Header.Get(HMACHeaderTimestamp)
+		nonce := r.Header.Get(HMACHeaderNonce)
+		if sig == "" || ts == "" || nonce == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(RelayResponse{Error: "missing HMAC headers"})
+			return
+		}
+		if err := ValidateTimestamp(ts); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
+			return
+		}
+		if err := VerifySignature([]byte(hmacKey), ts, nonce, body, sig); err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
+			return
+		}
+
+		var req RelayRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
+			return
+		}
+
+		var stanzas []*age.Stanza
+		for _, s := range req.Stanzas {
+			b, _ := base64.RawStdEncoding.DecodeString(s.Body)
+			stanzas = append(stanzas, &age.Stanza{Type: s.Type, Args: s.Args, Body: b})
+		}
+
+		fileKey, err := identity.Unwrap(stanzas)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
+			return
+		}
+
+		json.NewEncoder(w).Encode(RelayResponse{
+			FileKey: base64.RawStdEncoding.EncodeToString(fileKey),
+		})
+	}))
+}
+
+func TestEndToEndWithHMACRelay(t *testing.T) {
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipientStr := identity.Recipient().String()
+	hmacSecret := "my-shared-hmac-secret"
+
+	server := newMockHMACRelayServer(t, identity, hmacSecret)
+	defer server.Close()
+
+	relayRecipient, err := NewRelayRecipient([]byte(recipientStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+
+	stanzas, err := relayRecipient.Wrap(fileKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag: tag,
+		Remote: RemoteConfig{
+			URL:     server.URL,
+			HMACKey: hmacSecret,
+		},
+	}
+
+	recovered, err := relayIdentity.Unwrap(stanzas)
+	if err != nil {
+		t.Fatalf("HMAC Unwrap: %v", err)
+	}
+
+	if !bytes.Equal(recovered, fileKey) {
+		t.Fatalf("file key mismatch:\n  got:  %x\n  want: %x", recovered, fileKey)
+	}
+	t.Log("HMAC relay unwrap succeeded")
+}
+
+func TestHMACRelayRejectsNoSignature(t *testing.T) {
+	identity, _ := age.GenerateX25519Identity()
+	recipientStr := identity.Recipient().String()
+
+	server := newMockHMACRelayServer(t, identity, "secret")
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+	stanzas, _ := relayRecipient.Wrap(fileKey)
+
+	tag := ComputeTag(recipientStr)
+	// No HMACKey → no signature headers sent → server rejects.
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL},
+	}
+
+	_, err := relayIdentity.Unwrap(stanzas)
+	if err == nil {
+		t.Fatal("expected error when HMAC headers are missing")
+	}
+	t.Logf("Got expected error: %v", err)
+}
+
+func TestHMACRelayRejectsWrongKey(t *testing.T) {
+	identity, _ := age.GenerateX25519Identity()
+	recipientStr := identity.Recipient().String()
+
+	server := newMockHMACRelayServer(t, identity, "correct-key")
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+	stanzas, _ := relayRecipient.Wrap(fileKey)
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag: tag,
+		Remote: RemoteConfig{
+			URL:     server.URL,
+			HMACKey: "wrong-key",
+		},
+	}
+
+	_, err := relayIdentity.Unwrap(stanzas)
+	if err == nil {
+		t.Fatal("expected error for wrong HMAC key")
+	}
+	t.Logf("Got expected error: %v", err)
 }

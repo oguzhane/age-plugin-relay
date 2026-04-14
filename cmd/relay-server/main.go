@@ -3,7 +3,7 @@
 //
 // Usage:
 //
-//	relay-server -identity keys.txt [-addr :9876] [-tls-cert cert.pem -tls-key key.pem] [-tls-ca ca.pem] [-auth-token TOKEN]
+//	relay-server -identity keys.txt [-addr :9876] [-tls-cert cert.pem -tls-key key.pem] [-tls-ca ca.pem] [-auth-token TOKEN] [-hmac-key KEY]
 package main
 
 import (
@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"filippo.io/age"
 
@@ -30,6 +32,7 @@ func main() {
 	tlsKey := ""
 	tlsCA := ""
 	authToken := ""
+	hmacKey := ""
 
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -63,6 +66,11 @@ func main() {
 			if i < len(os.Args) {
 				authToken = os.Args[i]
 			}
+		case "-hmac-key":
+			i++
+			if i < len(os.Args) {
+				hmacKey = os.Args[i]
+			}
 		}
 	}
 
@@ -75,12 +83,39 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  -tls-key <file>     TLS server private key (required with -tls-cert)\n")
 		fmt.Fprintf(os.Stderr, "  -tls-ca <file>      CA certificate for client verification (enables mTLS)\n")
 		fmt.Fprintf(os.Stderr, "  -auth-token <token>  Required Bearer token for all requests\n")
+		fmt.Fprintf(os.Stderr, "  -hmac-key <key>      HMAC-SHA256 shared key for request signing + replay protection\n")
 		os.Exit(1)
 	}
 
 	// Auth token from flag or env.
 	if authToken == "" {
 		authToken = os.Getenv("RELAY_AUTH_TOKEN")
+	}
+
+	// HMAC key from flag or env.
+	if hmacKey == "" {
+		hmacKey = os.Getenv("RELAY_HMAC_KEY")
+	}
+
+	// Nonce cache for HMAC replay protection.
+	var (
+		nonceMu    sync.Mutex
+		seenNonces = make(map[string]time.Time)
+	)
+	if hmacKey != "" {
+		go func() {
+			for {
+				time.Sleep(relay.HMACMaxDrift)
+				nonceMu.Lock()
+				now := time.Now()
+				for k, t := range seenNonces {
+					if now.Sub(t) > relay.HMACMaxDrift {
+						delete(seenNonces, k)
+					}
+				}
+				nonceMu.Unlock()
+			}
+		}()
 	}
 
 	identities, err := loadIdentities(identityFile)
@@ -109,6 +144,34 @@ func main() {
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "reading body: " + err.Error()})
 			return
+		}
+
+		// HMAC signature verification (optional).
+		if hmacKey != "" {
+			sig := r.Header.Get(relay.HMACHeaderSignature)
+			ts := r.Header.Get(relay.HMACHeaderTimestamp)
+			nonce := r.Header.Get(relay.HMACHeaderNonce)
+			if sig == "" || ts == "" || nonce == "" {
+				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "missing HMAC signature headers"})
+				return
+			}
+			if err := relay.ValidateTimestamp(ts); err != nil {
+				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: " + err.Error()})
+				return
+			}
+			if err := relay.VerifySignature([]byte(hmacKey), ts, nonce, body, sig); err != nil {
+				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: " + err.Error()})
+				return
+			}
+			// Reject replayed nonces.
+			nonceMu.Lock()
+			if _, seen := seenNonces[nonce]; seen {
+				nonceMu.Unlock()
+				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: duplicate nonce"})
+				return
+			}
+			seenNonces[nonce] = time.Now()
+			nonceMu.Unlock()
 		}
 
 		var req relay.RelayRequest

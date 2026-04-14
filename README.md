@@ -149,7 +149,7 @@ The target is either a full URL (legacy) or a remote name (config mode).
 
 | Field | Size | Description |
 |---|---|---|
-| `tag` | 4 bytes | `SHA-256(inner_recipient_string)[:4]` — matches stanzas to this identity |
+| `tag` | 16 bytes | `SHA-256(inner_recipient_string)[:16]` — matches stanzas to this identity |
 | `target` | variable | URL (`https://...`) or remote name (`myserver`) |
 
 Not secret. Contains no key material — only routing information. Safe to commit to version control.
@@ -274,6 +274,8 @@ remotes:
     tls_ca: /path/to/ca.crt                        # optional (custom CA)
     timeout: 5m                                    # optional (default: 5m)
     stream: true                                   # optional (SSE for long-running requests)
+    auth_token: my-bearer-token                    # optional (Bearer token for simple auth)
+    hmac_key: my-shared-secret                     # optional (HMAC-SHA256 request signing)
 
   backup:
     url: https://backup.example:9999/unwrap
@@ -303,6 +305,8 @@ Per-remote config takes priority over environment variables:
 | `AGE_PLUGIN_RELAY_TLS_CERT` | — | Client TLS certificate (fallback if not set per-remote) |
 | `AGE_PLUGIN_RELAY_TLS_KEY` | — | Client TLS private key (fallback if not set per-remote) |
 | `AGE_PLUGIN_RELAY_TLS_CA` | — | CA certificate for server verification (fallback if not set per-remote) |
+| `AGE_PLUGIN_RELAY_AUTH_TOKEN` | — | Bearer token for relay server auth (fallback if not set per-remote) |
+| `AGE_PLUGIN_RELAY_HMAC_KEY` | — | HMAC-SHA256 shared key for request signing (fallback if not set per-remote) |
 
 ## Architecture
 
@@ -315,9 +319,11 @@ age-plugin-relay/
 │   ├── identity.go                     # RelayIdentity, NewRelayIdentity, Unwrap, ResolveRemote
 │   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser
 │   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote
-│   ├── relay_test.go                   # 9 unit tests (incl. SSE)
-│   ├── integration_test.go             # 6 integration tests (mock relay, config, errors)
-│   └── e2e_test.go                     # 2 E2E tests (real binaries, full user flow)
+│   ├── hmac.go                         # HMAC-SHA256 request signing and verification
+│   ├── relay_test.go                   # Unit tests (mock relay, SSE, HMAC)
+│   ├── hmac_test.go                    # HMAC signing unit tests
+│   ├── integration_test.go             # Integration tests (mock relay, config, errors)
+│   └── e2e_test.go                     # E2E tests (real binaries, full user flow)
 ├── cmd/
 │   ├── age-plugin-relay/
 │   │   └── main.go                     # Plugin binary: flags, --generate, HandleRecipient/Identity
@@ -343,7 +349,7 @@ go test -v ./relay/
 
 | Test | What it validates |
 |---|---|
-| `TestComputeTagDeterministic` | Same input always produces same 4-byte tag |
+| `TestComputeTagDeterministic` | Same input always produces same 16-byte tag |
 | `TestComputeTagDifferent` | Different inputs produce different tags |
 | `TestEncodeDecodeRecipient` | `age1relay1...` round-trips through Bech32 encode/decode |
 | `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and target preserved |
@@ -352,6 +358,14 @@ go test -v ./relay/
 | `TestUnwrapNoMatchingStanza` | Non-matching stanzas return `age.ErrIncorrectIdentity` |
 | `TestEndToEndWithSSERelay` | Full wrap/unwrap flow over SSE (heartbeat + result event) |
 | `TestSSERelayError` | Error event from SSE relay (wrong identity) |
+| `TestEndToEndWithHMACRelay` | Full wrap/unwrap with HMAC-signed requests |
+| `TestHMACRelayRejectsNoSignature` | Server rejects missing HMAC headers |
+| `TestHMACRelayRejectsWrongKey` | Server rejects wrong HMAC key |
+| `TestSignAndVerify` | HMAC sign + verify round-trip |
+| `TestVerifyWrongKey` | HMAC rejects wrong key |
+| `TestVerifyTamperedBody` | HMAC rejects tampered payload |
+| `TestValidateTimestamp` | Timestamp within/outside 5m window |
+| `TestNoncesAreUnique` | 100 nonces are all distinct |
 
 ### Integration tests
 
@@ -398,11 +412,90 @@ The `relay-server` (`cmd/relay-server/main.go`) is a minimal HTTP server that:
 
 In production, the relay endpoint could be anything — an approval gateway, a WebSocket relay agent, a serverless function, etc.
 
+## Authentication & Request Signing
+
+Two optional, independent mechanisms protect the relay endpoint:
+
+### Bearer Token (simple)
+
+A shared token sent as `Authorization: Bearer <token>`. Quick to set up, no replay protection.
+
+```yaml
+# relay-config.yaml
+remotes:
+  myserver:
+    url: https://relay.example:8443/unwrap
+    auth_token: my-secret-token
+```
+
+Server: `relay-server -identity keys.txt -auth-token my-secret-token`
+
+### HMAC-SHA256 Signing (recommended)
+
+Each request is signed with HMAC-SHA256 over `timestamp.nonce.body`. Provides authentication **and** replay protection.
+
+```yaml
+# relay-config.yaml
+remotes:
+  myserver:
+    url: https://relay.example:8443/unwrap
+    hmac_key: my-shared-secret
+```
+
+Server: `relay-server -identity keys.txt -hmac-key my-shared-secret`
+
+The client attaches three headers to every request:
+
+| Header | Value |
+|---|---|
+| `X-Relay-Timestamp` | Unix timestamp (seconds) |
+| `X-Relay-Nonce` | 16-byte random hex |
+| `X-Relay-Signature` | `HMAC-SHA256(key, "{timestamp}.{nonce}.{body}")` hex |
+
+The server verifies the signature, rejects timestamps outside a 5-minute window, and rejects duplicate nonces.
+
+Both mechanisms can be used together (Bearer is checked first, then HMAC).
+
+## Relay Server
+
+The included `relay-server` supports TLS, mTLS, Bearer auth, and HMAC verification:
+
+```bash
+# Minimal (plaintext HTTP — testing only)
+relay-server -identity keys.txt
+
+# TLS
+relay-server -identity keys.txt \
+  -tls-cert server.crt -tls-key server.key
+
+# mTLS (require client certificates)
+relay-server -identity keys.txt \
+  -tls-cert server.crt -tls-key server.key -tls-ca ca.crt
+
+# With HMAC signing
+relay-server -identity keys.txt \
+  -tls-cert server.crt -tls-key server.key \
+  -hmac-key my-shared-secret
+```
+
+Flags and environment variables:
+
+| Flag | Env | Description |
+|---|---|---|
+| `-identity <file>` | — | Age identity file (required) |
+| `-addr <addr>` | — | Listen address (default `:9876`) |
+| `-tls-cert <file>` | — | TLS server certificate (enables HTTPS) |
+| `-tls-key <file>` | — | TLS server private key |
+| `-tls-ca <file>` | — | CA cert for client verification (enables mTLS) |
+| `-auth-token <token>` | `RELAY_AUTH_TOKEN` | Required Bearer token |
+| `-hmac-key <key>` | `RELAY_HMAC_KEY` | HMAC-SHA256 shared key |
+
 ## Security Properties
 
 - **Encryption is offline** — uses only the inner recipient's public key. No network, no relay, no hardware.
 - **No secrets in the plugin** — the recipient contains only a public key string; the identity contains only a tag and URL.
 - **File key (16 bytes) travels over HTTPS** — use TLS/mTLS for transport security.
+- **HMAC request signing** — prevents replay attacks and authenticates requests (optional, recommended).
 - **With SOPS key groups + Shamir** — intercepting one group's unwrapped share is information-theoretically useless without the other share(s).
 - **Relay endpoint is the trust boundary** — it holds the actual private key or identity. The plugin itself holds no key material.
 

@@ -82,6 +82,21 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
 
+	// HMAC request signing (optional).
+	hmacKey := remote.HMACKey
+	if hmacKey == "" {
+		hmacKey = os.Getenv("AGE_PLUGIN_RELAY_HMAC_KEY")
+	}
+	if hmacKey != "" {
+		ts, nonce, sig, err := SignRequest([]byte(hmacKey), body)
+		if err != nil {
+			return nil, fmt.Errorf("signing request: %w", err)
+		}
+		httpReq.Header.Set(HMACHeaderTimestamp, ts)
+		httpReq.Header.Set(HMACHeaderNonce, nonce)
+		httpReq.Header.Set(HMACHeaderSignature, sig)
+	}
+
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("posting to relay %s: %w", remote.URL, err)

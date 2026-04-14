@@ -30,6 +30,7 @@ type RemoteConfig struct {
 	Timeout   string `yaml:"timeout,omitempty"`    // optional: Go duration (default: 5m)
 	Stream    bool   `yaml:"stream,omitempty"`     // optional: use SSE for long-running requests
 	AuthToken string `yaml:"auth_token,omitempty"` // optional: Bearer token for relay server auth
+	HMACKey   string `yaml:"hmac_key,omitempty"`   // optional: HMAC-SHA256 shared key for request signing + replay protection
 }
 
 // TimeoutDuration parses the timeout string, falling back to DefaultTimeout.
