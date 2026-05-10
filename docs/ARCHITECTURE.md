@@ -84,9 +84,9 @@ On decryption the plugin strips `relay` and the tag, reconstructs the original i
 
 ---
 
-## 3. Wire Protocol
+## 3. Encrypted Payload Design
 
-Payload encryption is mandatory and unconditional — no configuration flags. Both directions use `age.Encrypt`/`age.Decrypt` as the sole cryptographic primitive. The broker stores and forwards opaque blobs in both directions.
+Payload encryption is mandatory and unconditional — no configuration flags. Both directions use `age.Encrypt`/`age.Decrypt` as the sole cryptographic primitive (X25519 + HKDF + ChaCha20-Poly1305 STREAM), eliminating NaCl box entirely.
 
 Design goals:
 - **Confidentiality**: the broker cannot read stanzas, ephemeral keys, or file keys.
@@ -95,9 +95,22 @@ Design goals:
 - **Symmetry**: both request path (plugin → operator) and response path (operator → plugin) use the same `encrypted_payload` pattern.
 - **Sync/async compatibility**: the same wire format works for both `relay-server` (sync) and `relay-broker` + `relay-operator` (async).
 
-All messages are JSON over `POST` to a single endpoint URL. Bearer auth uses `Authorization: Bearer <auth_token>`. All request payloads containing stanzas are encrypted end-to-end via `encrypted_payload`.
+All messages are JSON over `POST` to a single endpoint URL. Bearer auth uses `Authorization: Bearer <auth_token>`.
 
-### 3.1. Outer Envelope
+### 3.1. Unwrap Recipient Resolution
+
+The plugin needs the operator's age recipient string to `age.Encrypt` the payload. At decrypt time, the identity only has a tag (irreversible hash) and a relay target. The inner recipient string is provided via the `unwrap_recipient` field in `relay-config.yaml`:
+
+```yaml
+remotes:
+  myserver:
+    url: https://broker.example:8443
+    unwrap_recipient: age1abc...    # age recipient of the unwrapper
+```
+
+This is the same public key the relay recipient was created with. The identity format is unchanged (`tag || target`). Config mode is required — legacy URL-only identities are not supported with encrypted payload.
+
+### 3.2. Outer Envelope
 
 Every request to the broker/relay-server has at most these cleartext fields:
 
@@ -113,63 +126,9 @@ Every request to the broker/relay-server has at most these cleartext fields:
 
 No stanzas, no ephemeral keys, no file keys at the outer level.
 
-#### Request JSON
+### 3.3. Inner Request Payload
 
-```http
-POST / HTTP/1.1
-Content-Type: application/json
-
-{
-  "version": 1,
-  "action": "unwrap",
-  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-  "tag": "QPg24g",
-  "expires_at": 1715350800,
-  "stream": true,
-  "encrypted_payload": "<base64: age-encrypted blob>"
-}
-```
-
-- `version`: Protocol version (currently `1`).
-- `action`: The operation to perform. Defined actions: `"unwrap"`, `"poll"`, `"pull"`, `"fulfill"`, `"reject"`.
-- `intent_id`: Plugin-generated unique ID (16 random bytes, hex-encoded).
-- `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:4]`, base64).
-- `expires_at`: Unix timestamp (seconds) — intent expiry.
-- `stream`: Optional. If `true`, the client accepts SSE responses.
-- `encrypted_payload`: age-encrypted inner payload containing stanzas, ephemeral key, outer hash, and nonce. Opaque to the broker.
-
-#### Response JSON
-
-**Success (200):**
-
-```json
-{
-  "encrypted_payload": "<base64: age-encrypted inner response>"
-}
-```
-
-**Errors:**
-
-| HTTP Status | Body | Meaning |
-|---|---|---|
-| 404 | `{"error": "no_matching_identity"}` | No identity can unwrap these stanzas |
-| 408 | `{"error": "timeout"}` | Identity interaction timed out (e.g., YubiKey not touched) |
-| 503 | `{"error": "unavailable"}` | Relay can't reach the identity |
-
-### 3.2. Unwrap Recipient Resolution
-
-The plugin needs the operator's age recipient string to `age.Encrypt` the payload. At decrypt time, the identity only has a tag (irreversible hash) and a relay target. The inner recipient string is provided via the `unwrap_recipient` field in `relay-config.yaml`:
-
-```yaml
-remotes:
-  myserver:
-    url: https://broker.example:8443
-    unwrap_recipient: age1abc...    # age recipient of the unwrapper
-```
-
-This is the same public key the relay recipient was created with. The identity format is unchanged (`tag || target`). Config mode is required — legacy URL-only identities are not supported with encrypted payload.
-
-### 3.3. Inner Request Payload (age-encrypted to operator's recipient)
+age-encrypted to the operator's recipient. Contains the stanzas and ephemeral key the operator needs to unwrap.
 
 ```json
 {
@@ -191,30 +150,9 @@ This is the same public key the relay recipient was created with. The identity f
 
 **Encryption**: `age.Encrypt` to the operator's inner recipient (same recipient string the plugin uses for `Wrap`). Works with any recipient type: X25519, YubiKey, PQ, any plugin. The age encryption layer adds its own ephemeral key and nonce internally. Output: base64-encoded standard age ciphertext.
 
-**Outer hash construction:**
+### 3.4. Inner Response Payload
 
-```
-SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")
-```
-
-Example:
-
-```
-SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
-```
-
-Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Deterministic on both sides.
-
-**Operator verification:**
-
-1. `age.Decrypt(encrypted_payload, identity)` → inner payload JSON.
-2. Parse inner payload.
-3. Check `expires_at` from the outer fields — if in the past, reject the intent (expired).
-4. Recompute `SHA-256("version.action.intent_id.tag.expires_at")` from the outer fields.
-5. Compare against `outer_hash` — mismatch = broker tampered = reject the intent.
-6. Extract `stanzas` and `ephemeral_key`, proceed with unwrap.
-
-### 3.4. Inner Response Payload (age-encrypted to plugin's ephemeral recipient)
+age-encrypted to the plugin's ephemeral recipient. Contains the unwrapped file key.
 
 ```json
 {
@@ -230,11 +168,27 @@ Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Determini
 | `outer_hash` | `SHA-256(intent_id)` — binds the sealed response to the specific intent. |
 | `file_key` | The unwrapped age file key, base64 raw standard encoded. |
 
-**Encryption**: `age.Encrypt` (X25519 + HKDF + ChaCha20-Poly1305) to the plugin's ephemeral age recipient (extracted from the inner request payload). age internally generates a one-time ephemeral key per encryption.
+**Encryption**: `age.Encrypt` (X25519 + HKDF + ChaCha20-Poly1305) to the plugin's ephemeral age recipient (extracted from the inner request payload). age internally generates a one-time ephemeral key per encryption. Wire format: base64-encoded standard age binary ciphertext (same as request direction).
 
-Wire format: base64-encoded standard age binary ciphertext (same format as the request direction). Both directions use the same cryptographic primitive (`age.Encrypt`/`age.Decrypt`), eliminating NaCl box entirely.
+### 3.5. Outer Hash Construction
 
-**Response outer hash construction:**
+The outer hash binds the encrypted blob to the cleartext routing fields. Any modification by the broker is detected.
+
+**Request outer hash** (verified by operator):
+
+```
+SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")
+```
+
+Example:
+
+```
+SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
+```
+
+Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Deterministic on both sides.
+
+**Response outer hash** (verified by plugin):
 
 ```
 SHA-256("{intent_id}")
@@ -246,54 +200,6 @@ Example:
 SHA-256("a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 ```
 
-**Plugin verification:**
-
-1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner payload JSON.
-2. Parse inner payload.
-3. Recompute `SHA-256(intent_id)` from the plugin's own stored intent_id.
-4. Compare against `outer_hash` — mismatch = tamper = fail.
-5. Extract `file_key`.
-
-### 3.5. Response Wire Formats
-
-#### Sync response (200 OK)
-
-```json
-{
-  "encrypted_payload": "<base64: age-encrypted inner response>"
-}
-```
-
-The `encrypted_payload` contains the inner response payload age-encrypted to the plugin's ephemeral recipient.
-
-#### Fulfill outer wire format (operator → broker)
-
-```json
-{
-  "version": 1,
-  "action": "fulfill",
-  "intent_id": "a3f1...",
-  "encrypted_payload": "<base64: age-encrypted inner response>"
-}
-```
-
-#### Poll response (broker → plugin)
-
-```json
-{
-  "status": "fulfilled",
-  "encrypted_payload": "<base64: age-encrypted inner response>"
-}
-```
-
-| Status | Body |
-|---|---|
-| `pending` | `{"status": "pending"}` |
-| `fulfilled` | `{"status": "fulfilled", "encrypted_payload": "..."}` |
-| `rejected` | `{"status": "rejected"}` |
-
-`404` for unknown/expired intents — the broker does not distinguish "expired" from "never existed."
-
 ### 3.6. Streaming (SSE)
 
 For long-running relay scenarios (approval flows, remote YubiKey touch), the server can respond with Server-Sent Events instead of a single JSON response. This keeps the connection alive through proxies and load balancers.
@@ -304,8 +210,6 @@ SSE is enabled per-remote via the `stream` field in `relay-config.yaml`. When en
 - `text/event-stream` → SSE stream
 
 Servers that don't support SSE simply ignore the `stream` field and return JSON.
-
-#### SSE events
 
 | Event | Data | Meaning |
 |---|---|---|
@@ -323,15 +227,99 @@ data: {"encrypted_payload": "<age-encrypted blob>"}
 
 ```
 
-Unknown event types are silently ignored for forward compatibility. The `stream` option is purely a transport concern (connection keep-alive), orthogonal to encryption.
+Unknown event types are silently ignored for forward compatibility. SSE is purely a transport concern (connection keep-alive), orthogonal to encryption.
 
 ---
 
 ## 4. Sync Flow
 
-The relay-server (sync flow) uses the identical wire format as the async flow. The `stream` option is purely a transport concern (connection keep-alive), orthogonal to encryption.
+Two actors: **Plugin** and **Relay-Server**. The relay-server holds the age identity and answers immediately. Same wire format as the async flow — the plugin discovers sync via a `200` response (vs `202` for async).
 
-### 4.1. Sequence diagram
+### 4.1. Request (plugin → relay-server)
+
+**Outer envelope:**
+
+```http
+POST / HTTP/1.1
+Content-Type: application/json
+Authorization: Bearer <auth_token>
+
+{
+  "version": 1,
+  "action": "unwrap",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+  "tag": "QPg24g",
+  "expires_at": 1715350800,
+  "stream": true,
+  "encrypted_payload": "<base64: age-encrypted blob>"
+}
+```
+
+- `version`: Protocol version (currently `1`).
+- `action`: `"unwrap"`.
+- `intent_id`: Plugin-generated unique ID (16 random bytes, hex-encoded, 32 chars).
+- `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:4]`, base64).
+- `expires_at`: Unix timestamp (seconds) — intent expiry.
+- `stream`: Optional. If `true`, the client accepts SSE responses.
+- `encrypted_payload`: age-encrypted inner request payload (see §3.3). Opaque to the broker.
+
+**Plugin build steps:**
+
+1. Generate ephemeral age X25519 identity (keypair).
+2. Build inner request payload: `{nonce, outer_hash, stanzas, ephemeral_key}`.
+3. `age.Encrypt(inner, unwrap_recipient)` → `encrypted_payload`.
+4. Build outer envelope with `version`, `action`, `intent_id`, `tag`, `expires_at`, `encrypted_payload`.
+5. POST to relay endpoint.
+
+### 4.2. Processing (relay-server)
+
+1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
+2. Parse inner payload.
+3. Check `expires_at` from the outer fields — reject if in the past.
+4. Recompute `SHA-256("version.action.intent_id.tag.expires_at")` from the outer fields.
+5. Compare against `outer_hash` — mismatch = tampered = reject.
+6. Extract `stanzas` and `ephemeral_key`.
+7. `identity.Unwrap(stanzas)` → file key.
+8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256(intent_id)`.
+9. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
+10. Return response.
+
+### 4.3. Response (relay-server → plugin)
+
+**Success (200 OK) — JSON:**
+
+```json
+{
+  "encrypted_payload": "<base64: age-encrypted inner response>"
+}
+```
+
+**Success (200 OK) — SSE:**
+
+```
+event: result
+data: {"encrypted_payload": "<age-encrypted blob>"}
+
+```
+
+**Errors:**
+
+| HTTP Status | Body | Meaning |
+|---|---|---|
+| 404 | `{"error": "no_matching_identity"}` | No identity can unwrap these stanzas |
+| 408 | `{"error": "timeout"}` | Identity interaction timed out (e.g., YubiKey not touched) |
+| 503 | `{"error": "unavailable"}` | Relay can't reach the identity |
+
+### 4.4. Plugin verification
+
+1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
+2. Parse inner payload.
+3. Recompute `SHA-256(intent_id)` from the plugin's own stored intent_id.
+4. Compare against `outer_hash` — mismatch = tamper = fail.
+5. Extract `file_key`.
+6. Discard ephemeral keypair.
+
+### 4.5. Sequence Diagram
 
 ```
 Plugin                                          Relay-Server
@@ -361,56 +349,35 @@ Plugin                                          Relay-Server
   │  {"encrypted_payload": "<age-encrypted blob>"}   │
   │ ◄──────────────────────────────────────────────  │
   │                                                  │
-  │ 12. age.Decrypt(encrypted_payload, eph_identity)  │
+  │ 12. age.Decrypt(encrypted_payload, eph_identity) │
   │ 13. Verify outer_hash == SHA-256(intent_id)      │
   │ 14. Extract file_key                             │
   │ 15. Discard ephemeral keypair                    │
   │                                                  │
 ```
 
-### 4.2. Processing steps (relay-server)
-
-1. `age.Decrypt(encrypted_payload, identity)` — relay-server holds the age identity.
-2. Check `expires_at` from outer fields — reject if expired.
-3. Verify `outer_hash` (includes `expires_at`).
-4. Extract stanzas + ephemeral_key.
-5. Unwrap stanzas → file key.
-6. Build response inner payload: `{nonce, outer_hash, file_key}`.
-7. `age.Encrypt` response to plugin's ephemeral recipient.
-8. Return response.
-
 ---
 
 ## 5. Async Flow (Control Tower)
 
-When the relay endpoint cannot answer synchronously (e.g., the operator identity is offline, or approval is required), the protocol supports an async brokered flow. The plugin learns which mode it got from the HTTP response code.
+Three actors: **Plugin**, **Broker**, and **Operator**. The broker is a zero-trust stateful queue — it stores and forwards opaque encrypted payloads. It holds no age identity, no key material, and no view into the cryptographic content. The operator is a separate process that polls the broker, decrypts, unwraps, and fulfills.
 
-### 5.1. Actors
+### 5.1. Response-Code Branching
 
-| Actor | Role | Holds |
-|---|---|---|
-| **Plugin** | Submits encrypted unwrap intents, polls for results | `unwrap_recipient` (for age encryption), broker `auth_token` |
-| **Broker** | Stateful queue and forwarder; **zero-trust** | broker `auth_token` only |
-| **Operator** | Polls for pending intents, decrypts, unwraps locally, seals response, fulfills or rejects | age private key, broker `auth_token` |
-
-The broker holds no age identity, no key material, and no view into the cryptographic content.
-
-### 5.2. Response-Code Branching
-
-A relay endpoint may choose to answer synchronously or asynchronously. The plugin learns which it got from the HTTP status code:
+The plugin discovers async via the HTTP status code on its `unwrap` POST:
 
 | Status | Body | Plugin behavior |
 |---|---|---|
-| `200 OK` | `{"encrypted_payload": ...}` | Sync result — done |
+| `200 OK` | `{"encrypted_payload": ...}` | Sync result — done (see §4) |
 | `202 Accepted` | `{}` | Async — switch to polling using the plugin's own `intent_id` |
 | `409 Conflict` | `{"error":"duplicate_intent"}` | Retry with a freshly generated `intent_id` |
 | `4xx/5xx` | as today | Errors |
 
 The plugin does not need to know whether the endpoint is a `relay-server` or a `relay-broker`. The protocol is uniform; behavior is response-driven.
 
-### 5.3. Actions
+### 5.2. Submit (plugin → broker)
 
-#### `unwrap` (extended; sync-compatible)
+**Outer envelope** — identical to the sync request (§4.1):
 
 ```json
 {
@@ -423,30 +390,15 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
 }
 ```
 
+**Inner request payload** — identical to §3.3. Contains `{nonce, outer_hash, stanzas, ephemeral_key}`, age-encrypted to the operator's `unwrap_recipient`.
+
 - `intent_id` is **plugin-generated**: 16 random bytes, hex-encoded (32 chars).
-- `encrypted_payload` contains the age-encrypted inner payload (stanzas, ephemeral key, outer hash, nonce). Opaque to the broker.
 - `expires_at` is the plugin-defined intent expiry (Unix timestamp, seconds).
+- `encrypted_payload` is opaque to the broker.
 
-#### `poll`
+**Response:** `202 Accepted` with empty body `{}`.
 
-```json
-{
-  "version": 1,
-  "action": "poll",
-  "intent_id": "a3f1..."
-}
-```
-
-| Status | Body | Meaning |
-|---|---|---|
-| `200 OK` | `{"status":"pending"}` | Keep polling |
-| `200 OK` | `{"status":"fulfilled", "encrypted_payload": "..."}` | Plugin decrypts with its ephemeral identity, verifies outer_hash |
-| `200 OK` | `{"status":"rejected"}` | Operator declined; plugin returns failure |
-| `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
-
-The broker does not distinguish "expired" from "never existed." Both collapse to `404`.
-
-#### `pull`
+### 5.3. Pull (operator → broker)
 
 ```json
 {
@@ -456,7 +408,7 @@ The broker does not distinguish "expired" from "never existed." Both collapse to
 }
 ```
 
-Response — the full request, verbatim, for each pending intent matching the tag:
+**Response** — the full original request, verbatim, for each pending intent matching the tag:
 
 ```json
 {
@@ -476,15 +428,23 @@ Response — the full request, verbatim, for each pending intent matching the ta
 }
 ```
 
-The operator MUST:
-1. `age.Decrypt(encrypted_payload, identity)` to obtain the inner payload.
-2. Verify `outer_hash` matches the recomputed `SHA-256("version.action.intent_id.tag.expires_at")`.
-3. Check `expires_at` — reject if in the past.
-4. Extract stanzas and ephemeral key, proceed with unwrap.
-
 The response contains **no broker-asserted metadata** — no `created_at`, no broker timestamps.
 
-#### `fulfill`
+### 5.4. Operator Processing
+
+The operator receives the verbatim outer envelope from the broker and processes it identically to a relay-server:
+
+1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
+2. Parse inner payload.
+3. Check `expires_at` from the outer fields — reject if in the past.
+4. Recompute `SHA-256("version.action.intent_id.tag.expires_at")` from the outer fields.
+5. Compare against `outer_hash` — mismatch = broker tampered = reject the intent.
+6. Extract `stanzas` and `ephemeral_key`.
+7. `identity.Unwrap(stanzas)` → file key.
+8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256(intent_id)`.
+9. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
+
+### 5.5. Fulfill (operator → broker)
 
 ```json
 {
@@ -495,11 +455,11 @@ The response contains **no broker-asserted metadata** — no `created_at`, no br
 }
 ```
 
-- `encrypted_payload` format: `age.Encrypt` of `{nonce, outer_hash, file_key}` to the plugin's ephemeral recipient from the original request.
+The `encrypted_payload` contains the inner response payload (§3.4) age-encrypted to the plugin's ephemeral recipient from the original request.
 
-Response: `200 OK` on success, `404` if `intent_id` is unknown, `409` if already terminal.
+**Response:** `200 OK` on success, `404` if `intent_id` is unknown, `409` if already terminal.
 
-#### `reject`
+### 5.6. Reject (operator → broker)
 
 ```json
 {
@@ -509,9 +469,39 @@ Response: `200 OK` on success, `404` if `intent_id` is unknown, `409` if already
 }
 ```
 
-Response: `200 OK` on success, `404`/`409` as for `fulfill`.
+**Response:** `200 OK` on success, `404`/`409` as for `fulfill`.
 
-### 5.4. State Machine
+### 5.7. Poll (plugin → broker)
+
+```json
+{
+  "version": 1,
+  "action": "poll",
+  "intent_id": "a3f1..."
+}
+```
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200 OK` | `{"status":"pending"}` | Keep polling |
+| `200 OK` | `{"status":"fulfilled", "encrypted_payload": "..."}` | Plugin decrypts with its ephemeral identity, verifies outer_hash |
+| `200 OK` | `{"status":"rejected"}` | Operator declined; plugin returns failure |
+| `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
+
+The broker does not distinguish "expired" from "never existed." Both collapse to `404`.
+
+### 5.8. Plugin Verification
+
+On receiving a `fulfilled` poll response:
+
+1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
+2. Parse inner payload.
+3. Recompute `SHA-256(intent_id)` from the plugin's own stored intent_id.
+4. Compare against `outer_hash` — mismatch = tamper = fail.
+5. Extract `file_key`.
+6. Discard ephemeral keypair.
+
+### 5.9. State Machine
 
 ```
                 ┌──────────┐
@@ -526,7 +516,7 @@ Response: `200 OK` on success, `404`/`409` as for `fulfill`.
 
 All states are terminal once entered. The broker silently deletes intents after its internal TTL; the plugin observes this as `404 unknown_intent` on `poll`.
 
-### 5.5. Polling Cadence
+### 5.10. Polling Cadence
 
 The broker emits **no flow-control hints**. Cadence is a client-side concern.
 
@@ -539,7 +529,7 @@ The broker emits **no flow-control hints**. Cadence is a client-side concern.
 - Configurable via the operator binary's flags (e.g., `--pull-interval 30s`).
 - No coordination with the plugin or broker required.
 
-### 5.6. Async Sequence Diagram
+### 5.11. Fulfillment Sequence Diagram
 
 ```
 Plugin                          Broker                          Operator
@@ -611,7 +601,7 @@ Plugin                          Broker                          Operator
   │                               │                                │
 ```
 
-### 5.7. Rejection Flow
+### 5.12. Rejection Sequence Diagram
 
 ```
 Plugin                          Broker                          Operator
@@ -648,7 +638,7 @@ Plugin                          Broker                          Operator
   │                               │                                │
 ```
 
-### 5.8. Idempotency, Replay, and Recovery
+### 5.13. Idempotency, Replay, and Recovery
 
 #### Intent ID collisions
 - The broker enforces uniqueness: a second `unwrap` with an existing `intent_id` returns `409 Conflict`.
