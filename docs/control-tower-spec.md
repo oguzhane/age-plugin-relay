@@ -295,7 +295,7 @@ The broker has no age identity, no notion of `flow`.
 - `relay/broker/types.go` — `Intent`, `Status`, `PullIntent`, `PullResponse`, `PollResponse`, `AsyncAccepted`
 - `relay/broker/queue_test.go` — broker queue unit tests
 - `relay/payload.go` — encrypted payload types and functions
-- `relay/async_test.go` — async flow tests
+- `relay/async_test.go` — async flow tests (Control Tower protocol E2E, broker blindness, tamper detection)
 
 ### Modified files
 - `relay/client.go` — `PostToRelay` handles `202` → `pollForResult` loop, `409` conflict; always builds encrypted payload; exported `GenerateIntentID`

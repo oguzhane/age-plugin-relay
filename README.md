@@ -378,6 +378,8 @@ age-plugin-relay/
 go test -v ./relay/
 ```
 
+#### Encoding tests (`encoding_test.go`)
+
 | Test | What it validates |
 |---|---|
 | `TestComputeTagDeterministic` | Same input always produces same 16-byte tag |
@@ -385,43 +387,99 @@ go test -v ./relay/
 | `TestEncodeDecodeRecipient` | `age1relay1...` round-trips through Bech32 encode/decode |
 | `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and target preserved |
 | `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, inner type `X25519` |
-| `TestEndToEndWithMockRelay` | Full flow: wrap, encrypted payload to mock server, server decrypts/verifies/unwraps/seals, file key matches |
-| `TestUnwrapNoMatchingStanza` | Non-matching stanzas return `age.ErrIncorrectIdentity` |
-| `TestEndToEndWithSSERelay` | Full wrap/unwrap flow over SSE with encrypted payload |
-| `TestSSERelayError` | Error event from SSE relay (wrong identity) |
-| `TestUnwrapMissingUnwrapRecipient` | Clear error when `unwrap_recipient` is not set |
-| `TestExtractFileKeyEmpty` | Empty response returns error |
 
-### Payload encryption tests
+#### Identity tests (`identity_test.go`)
 
 | Test | What it validates |
 |---|---|
-| `TestOuterHashRequestDeterministic` | Same inputs produce same hash |
-| `TestOuterHashResponseDeterministic` | Same intent_id produces same hash |
-| `TestOuterHashKnownAnswer` | Known-answer test for hash computation |
+| `TestEndToEndWithMockRelay` | Full flow: wrap, encrypted payload to mock server, server decrypts/verifies/unwraps/seals, file key matches |
+| `TestEndToEndWithSSERelay` | Full wrap/unwrap flow over SSE with encrypted payload |
+| `TestSSERelayError` | Error event from SSE relay (wrong identity) |
+| `TestUnwrapNoMatchingStanza` | Non-matching stanzas return `age.ErrIncorrectIdentity` |
+| `TestUnwrapMissingUnwrapRecipient` | Clear error when `unwrap_recipient` is not set |
+| `TestResolveRemoteHTTPWarning` | HTTP URL resolves with warning |
+| `TestResolveRemoteHTTPS` | HTTPS URL resolves directly |
+| `TestResolveRemoteNamedNotFound` | Named remote without config returns error |
+| `TestConcurrentUnwrapRequests` | 10 concurrent unwrap requests all succeed |
+
+#### Client tests (`client_test.go`)
+
+| Test | What it validates |
+|---|---|
+| `TestGenerateIntentIDFormat` | Intent ID is 32 lowercase hex chars |
+| `TestGenerateIntentIDUniqueness` | 100 generated intent IDs are all unique |
+| `TestSanitizeErrorMsgShort` | Short messages pass through unchanged |
+| `TestSanitizeErrorMsgTruncation` | Messages > 256 chars truncated with `...` |
+| `TestSanitizeErrorMsgControlChars` | Control chars stripped, tabs/newlines preserved |
+| `TestSanitizeErrorMsgEmpty` | Empty string returns empty |
+| `TestExtractFileKeyEmpty` | Empty response returns error |
+| `TestExtractFileKeyBadBase64` | Invalid base64 returns error |
+| `TestExtractFileKeyWrongKey` | Wrong NaCl key returns error |
+| `TestExtractFileKeyWrongIntentID` | Wrong intent_id detected via outer_hash mismatch |
+| `TestFileKeyRecoveryVariousSizes` | Round-trip with 0, 1, 15, 16, 32, 64-byte file keys |
+| `TestPostToRelay5xxError` | Server 500 returns error |
+| `TestPostToRelayServerReturnsErrorInJSON` | Server 200 with error JSON returns error |
+| `TestSSEHeartbeatOnly` | Heartbeat-only stream (no result) returns error |
+| `TestSSEErrorEvent` | SSE error event propagates error message |
+| `TestAuthTokenSentAsBearer` | Auth token sent as `Authorization: Bearer` header |
+| `TestNoAuthTokenOmitsHeader` | No auth token omits header entirely |
+| `TestWireFormatRequestFields` | Request has version, action, intent_id, tag, expires_at, encrypted_payload; no outer stanzas |
+| `TestEncryptedPayloadAsyncE2E` | Full async flow: submit → 202 → poll → operator fulfills → plugin recovers file key |
+
+#### Config tests (`config_test.go`)
+
+| Test | What it validates |
+|---|---|
+| `TestLoadConfigInvalidYAML` | Invalid YAML returns parse error |
+| `TestLoadConfigMissing` | Missing config file returns nil (not error) |
+| `TestLookupRemoteEmptyURL` | Remote with empty URL returns error |
+| `TestLookupRemoteNilConfig` | Nil config returns error |
+| `TestLookupRemoteNotFound` | Missing remote name returns error with available list |
+| `TestTimeoutDurationDefault` | Default timeout is 5 minutes |
+| `TestTimeoutDurationInvalid` | Invalid duration falls back to 5 minutes |
+| `TestTimeoutDurationCustom` | Custom duration `30s` parsed correctly |
+| `TestPollIntervalDefault` | Default: `min(timeout/60, 5s)` with 500ms floor; explicit override works |
+
+#### Payload encryption tests (`payload_test.go`)
+
+| Test | What it validates |
+|---|---|
+| `TestOuterHashRequestDeterminism` | Same inputs produce same hash (known-answer test) |
+| `TestOuterHashResponseDeterminism` | Same intent_id produces same hash (known-answer test) |
+| `TestOuterHashRequestDifferentFields` | Different fields produce different hashes |
 | `TestEncryptDecryptPayloadRoundTrip` | Encrypt → decrypt round-trip preserves inner payload |
-| `TestDecryptPayloadWrongIdentity` | Decryption with wrong identity fails |
+| `TestDecryptPayloadWrongIdentityFails` | Decryption with wrong identity fails |
 | `TestVerifyRequestPayloadValid` | Valid outer hash passes verification |
 | `TestVerifyRequestPayloadTamperedHash` | Tampered outer fields detected |
 | `TestVerifyRequestPayloadExpired` | Expired `expires_at` rejected |
-| `TestBuildRequestPayload` | Request payload has correct fields |
-| `TestBuildResponsePayload` | Response payload has correct fields |
 | `TestVerifyResponsePayloadValid` | Valid response hash passes |
 | `TestVerifyResponsePayloadTamperedHash` | Tampered response hash detected |
-| `TestEncryptPayloadNonceUniqueness` | Two encryptions of same payload produce different ciphertext |
-| `TestFullPayloadFlow` | End-to-end: build → encrypt → decrypt → verify → unwrap |
-| `TestBuildRequestPayloadExpiresAtPreserved` | `expires_at` carried through correctly |
-| `TestDecryptPayloadEmpty` | Empty payload returns error |
+| `TestBuildRequestPayload` | Request payload has correct fields, 32-char hex nonce |
+| `TestBuildResponsePayload` | Response payload has correct fields, base64-encoded file key |
+| `TestNonceUniqueness` | Two encryptions of same payload produce different ciphertext |
+| `TestEncryptDecryptFullFlow` | End-to-end: build → encrypt → decrypt → verify |
+| `TestResponsePayloadFullFlow` | Build response → verify → decode file key |
+| `TestParseRecipientStringValid` | Valid X25519 recipient parses successfully |
+| `TestParseRecipientStringUnsupported` | Non-age recipient returns unsupported error |
+| `TestParseRecipientStringInvalid` | Invalid age1 string returns parse error |
+| `TestOuterHashTamperDetectionTag` | Encrypt → decrypt → verify with tampered tag fails |
+| `TestOuterHashTamperDetectionIntentID` | Encrypt → decrypt → verify with tampered intent_id fails |
+| `TestExpiresAtEnforcement` | Encrypt → decrypt → verify with expired timestamp fails |
 
-### Envelope tests
+#### Envelope tests (`envelope_test.go`)
 
 | Test | What it validates |
 |---|---|
 | `TestSealOpenResponse` | NaCl box seal/open round-trip with structured inner response |
 | `TestOpenResponseWrongKey` | Envelope rejects wrong private key |
 | `TestOpenResponseTruncated` | Envelope rejects truncated sealed data |
+| `TestOpenResponseBadBase64` | Invalid base64 returns error |
+| `TestOpenResponseTamperedCiphertext` | Flipped byte in ciphertext detected |
 | `TestSealResponseDifferentEachTime` | Two seals produce different ciphertext |
 | `TestEphemeralClear` | Private key is zeroed after `Clear()` |
+| `TestDerivePublicKeyConsistency` | `DerivePublicKey` matches `GenerateEphemeral` output |
+| `TestEphemeralKeypairsAreUnique` | 50 generated keypairs are all unique |
+| `TestSealOpenResponseVariousSizes` | Round-trip with 0, 1, 15, 16, 32, 64-byte file keys |
 
 ### Broker queue tests
 
@@ -467,8 +525,6 @@ go test -v ./relay/ -run TestAsync
 | `TestAsyncPluginPollingLoopRejected` | `PostToRelay` returns error on operator rejection |
 | `TestAsyncBrokerDoesNotSeeFileKey` | Broker only stores opaque encrypted payloads, never plaintext stanzas or file keys |
 | `TestAsyncOuterHashTamperDetection` | Outer hash detects tampered intent_id, tag, and expires_at |
-| `TestPollIntervalDefault` | Default poll interval calculation: `min(timeout/60, 5s)` with 500ms floor |
-| `TestGenerateIntentIDUniqueness` | 100 generated intent IDs are all unique |
 
 ### Integration tests
 
@@ -481,6 +537,10 @@ go test -v ./relay/ -run TestAsync
 | `TestIntegrationWrongIdentity` | Clean error when relay has wrong key |
 | `TestIntegrationEncryptedPayloadE2E` | Full encrypted payload end-to-end with mock server |
 | `TestIntegrationMissingUnwrapRecipient` | Clear error when `unwrap_recipient` is not configured |
+| `TestEncryptedPayloadSyncE2E` | Full `age.Encrypt` → `age.Decrypt` with encrypted payloads (JSON) |
+| `TestEncryptedPayloadSyncE2EWithSSE` | Full `age.Encrypt` → `age.Decrypt` with encrypted payloads (SSE) |
+| `TestBrokerBlindnessVerification` | Broker cannot parse or decrypt encrypted payloads; wrong identity fails |
+| `TestResponseOuterHashTamperingE2E` | Server returning wrong intent_id in response detected via outer_hash |
 
 ### E2E tests
 

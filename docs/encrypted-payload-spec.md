@@ -355,7 +355,6 @@ HMAC signing is **not compatible** with this feature in the current design. The 
 
 ### Removed files
 - `relay/hmac.go` — HMAC signing removed.
-- `relay/hmac_test.go` — corresponding tests.
 
 ### Unchanged files
 - `relay/encoding.go`, `relay/errors.go`, `relay/recipient.go`
@@ -374,8 +373,8 @@ HMAC signing is **not compatible** with this feature in the current design. The 
 8. `cmd/relay-broker/main.go` — field rename in fulfill/poll; remove HMAC header extraction
 9. `cmd/relay-server/main.go` — decrypt + verify + seal
 10. `cmd/relay-operator/main.go` — decrypt + verify, remove HMAC verification
-11. Remove `relay/hmac.go`, `relay/hmac_test.go`
-12. Tests: update all existing tests, add payload encryption round-trip tests
+11. Remove `relay/hmac.go`
+12. Tests: reorganized into per-source-file test files (`encoding_test.go`, `identity_test.go`, `client_test.go`, `config_test.go`, `payload_test.go`, `envelope_test.go`, `async_test.go`, `integration_test.go`, `e2e_test.go`, `helpers_test.go`)
 
 ---
 
