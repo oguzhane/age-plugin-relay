@@ -30,7 +30,9 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
 
 ```bash
 go build -o age-plugin-relay ./cmd/age-plugin-relay/
-go build -o relay-server ./cmd/relay-server/        # optional: test relay server
+go build -o relay-server ./cmd/relay-server/        # optional: sync relay server
+go build -o relay-broker ./cmd/relay-broker/        # optional: async broker
+go build -o relay-operator ./cmd/relay-operator/    # optional: async operator
 ```
 
 Place the binary in your `PATH` so `age` can discover it:
@@ -205,7 +207,7 @@ Content-Type: application/json
 ```
 
 - `version`: Protocol version (currently `1`).
-- `action`: The operation to perform. Currently only `"unwrap"` is defined.
+- `action`: The operation to perform. Defined actions: `"unwrap"`, `"poll"`, `"pull"`, `"fulfill"`, `"reject"`. See [Control Tower (Async Flow)](#control-tower-async-flow) for the async actions.
 - `stream`: Optional. If `true`, the client accepts SSE responses. See [Streaming (SSE)](#streaming-sse).
 - `stanzas`: Array of inner stanzas with the relay wrapping stripped. The `body` field is base64 raw standard encoded.
 
@@ -326,20 +328,31 @@ age-plugin-relay/
 │   ├── errors.go                       # Sentinel errors
 │   ├── recipient.go                    # RelayRecipient, NewRelayRecipient, Wrap
 │   ├── identity.go                     # RelayIdentity, NewRelayIdentity, Unwrap, ResolveRemote
-│   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser
-│   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote
+│   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser, async polling
+│   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote, PollInterval
 │   ├── hmac.go                         # HMAC-SHA256 request signing and verification
 │   ├── envelope.go                     # Ephemeral X25519 response encryption (NaCl box)
+│   ├── broker/                         # Broker queue package (package broker)
+│   │   ├── types.go                    # Intent, Status, PluginHeaders, PullResponse, PollResponse
+│   │   ├── queue.go                    # In-memory intent queue with TTL sweep
+│   │   └── queue_test.go              # Broker queue unit tests (18 tests)
 │   ├── relay_test.go                   # Unit tests (mock relay, SSE, HMAC, envelope)
 │   ├── hmac_test.go                    # HMAC signing unit tests
 │   ├── envelope_test.go                # Envelope seal/open unit tests
+│   ├── async_test.go                   # Async (Control Tower) tests (12 tests)
 │   ├── integration_test.go             # Integration tests (mock relay, config, errors)
 │   └── e2e_test.go                     # E2E tests (real binaries, full user flow)
 ├── cmd/
 │   ├── age-plugin-relay/
 │   │   └── main.go                     # Plugin binary: flags, --generate, HandleRecipient/Identity
-│   └── relay-server/
-│       └── main.go                     # Minimal relay HTTP server (imports relay package)
+│   ├── relay-server/
+│   │   └── main.go                     # Minimal relay HTTP server (sync flow)
+│   ├── relay-broker/
+│   │   └── main.go                     # Zero-trust broker HTTP server (async flow)
+│   └── relay-operator/
+│       └── main.go                     # Operator CLI: pull, verify HMAC, unwrap, seal, fulfill/reject
+├── docs/
+│   └── control-tower-spec.md           # Authoritative async flow spec
 ├── test.sh                             # Step-by-step CLI integration test
 └── README.md
 ```
@@ -385,6 +398,54 @@ go test -v ./relay/
 | `TestOpenTruncated` | Envelope rejects truncated sealed data |
 | `TestSealDifferentEachTime` | Two seals of same file key produce different ciphertext |
 | `TestEphemeralClear` | Private key is zeroed after Clear() |
+
+### Broker queue tests
+
+```bash
+go test -v ./relay/broker/
+```
+
+| Test | What it validates |
+|---|---|
+| `TestSubmitAndPoll` | Submit intent, poll returns pending status |
+| `TestSubmitDuplicateReturnsError` | Duplicate intent_id returns `duplicate_intent` error |
+| `TestPollUnknownReturnsNil` | Polling nonexistent intent returns nil |
+| `TestFulfillAndPoll` | Fulfill transitions intent to `fulfilled` with sealed key |
+| `TestRejectAndPoll` | Reject transitions intent to `rejected` |
+| `TestFulfillUnknownReturnsError` | Fulfilling unknown intent returns `unknown_intent` |
+| `TestRejectUnknownReturnsError` | Rejecting unknown intent returns `unknown_intent` |
+| `TestFulfillAlreadyFulfilledReturnsError` | Double-fulfill returns `intent_already_terminal` |
+| `TestRejectAlreadyRejectedReturnsError` | Double-reject returns `intent_already_terminal` |
+| `TestFulfillAfterRejectReturnsError` | Fulfill after reject returns error |
+| `TestPullReturnsOnlyPendingForTag` | Pull filters by tag and returns only pending intents |
+| `TestPullForwardsPluginHeaders` | Plugin HMAC headers forwarded verbatim through broker |
+| `TestTTLExpiresIntents` | Intents expire after TTL, poll returns nil |
+| `TestTTLExpiresPullResults` | Expired intents excluded from pull results |
+| `TestFulfillAfterTTLReturnsUnknown` | Fulfilling expired intent returns `unknown_intent` |
+| `TestRejectAfterTTLReturnsUnknown` | Rejecting expired intent returns `unknown_intent` |
+| `TestSweepCleansExpiredIntents` | Background sweep removes expired intents, IDs freed for reuse |
+| `TestMultipleTagsIsolation` | Different tags are fully isolated |
+
+### Async (Control Tower) tests
+
+```bash
+go test -v ./relay/ -run TestAsync
+```
+
+| Test | What it validates |
+|---|---|
+| `TestAsyncEndToEnd` | Full flow: submit → pull → HMAC verify → unwrap → seal → fulfill → poll → decrypt |
+| `TestAsyncRejectionFlow` | Operator rejection propagates to plugin poll |
+| `TestAsyncDuplicateIntentReturns409` | Broker returns 409 on duplicate intent_id |
+| `TestAsyncPollUnknownReturns404` | Polling nonexistent intent returns 404 |
+| `TestAsyncFulfillAfterRejectReturns409` | Fulfill on already-terminal intent returns 409 |
+| `TestAsyncPollAfterExpiry` | TTL expiry causes 404 on poll |
+| `TestAsyncPluginPollingLoop` | Full `PostToRelay` async branch with background fulfill goroutine |
+| `TestAsyncPluginPollingLoopRejected` | `PostToRelay` returns error on operator rejection |
+| `TestAsyncBrokerDoesNotSeeFileKey` | Broker only stores sealed ciphertext, never plaintext file key |
+| `TestAsyncHMACTamperDetection` | HMAC detects wrong key, tampered body, substituted ephemeral key |
+| `TestPollIntervalDefault` | Default poll interval calculation: `min(timeout/60, 5s)` with 500ms floor |
+| `TestGenerateIntentIDUniqueness` | 100 generated intent IDs are all unique |
 
 ### Integration tests
 
@@ -544,6 +605,100 @@ Uses Go's `golang.org/x/crypto/nacl/box` (NaCl `crypto_box`):
 
 The server's one-time keypair ensures the sealed box is unique even for identical file keys (defense against deterministic ciphertext analysis).
 
+## Control Tower (Async Flow)
+
+When the relay endpoint cannot answer synchronously (e.g., the operator identity is offline, or approval is required), the protocol supports an async brokered flow. The plugin learns which mode it got from the HTTP response code: `200` = sync result, `202 Accepted` = async.
+
+See [`docs/control-tower-spec.md`](docs/control-tower-spec.md) for the full specification.
+
+### Actors
+
+| Actor | Role | Holds |
+|---|---|---|
+| **Plugin** | Submits unwrap intents, polls for results | `hmac_key` (shared with operator), broker `auth_token` |
+| **Broker** | Stateful queue and forwarder; **zero-trust** | broker `auth_token` only |
+| **Operator** | Polls for pending intents, unwraps locally, fulfills or rejects | age private key, `hmac_key` (shared with plugin), broker `auth_token` |
+
+The broker holds no `hmac_key`, no age identity, and no view into the cryptographic content.
+
+### Flow
+
+```
+Plugin                       Broker                      Operator
+──────                       ──────                      ────────
+1. unwrap (HMAC-signed)  ──►  Queue intent (202)
+                                                    ◄──  2. pull by tag
+                              Return pending intents ──►
+                                                         3. Verify plugin HMAC E2E
+                                                         4. Unwrap stanzas locally
+                                                         5. Seal file key → NaCl box
+                                                    ◄──  6. fulfill (sealed key)
+7. poll intent_id        ──►
+   ◄── fulfilled + encrypted_file_key
+8. Open NaCl box with ephemeral private key → file key
+```
+
+### Actions
+
+| Action | Sender | Description |
+|---|---|---|
+| `unwrap` | Plugin | Submit stanzas + intent_id; returns `200` (sync) or `202` (async) |
+| `poll` | Plugin | Check intent status: `pending`, `fulfilled`, `rejected`, or `404` |
+| `pull` | Operator | Get all pending intents for a tag |
+| `fulfill` | Operator | Submit sealed file key for an intent |
+| `reject` | Operator | Decline an intent |
+
+### Async config
+
+```yaml
+# relay-config.yaml (plugin)
+remotes:
+  approved-server:
+    url: https://broker.example:8443/unwrap
+    auth_token: broker-bearer-token
+    hmac_key: shared-with-operator-only
+    encrypted_response: true
+    timeout: 10m
+    poll_interval: 2s          # optional; default min(timeout/60, 5s)
+```
+
+### Relay Broker
+
+The broker is a zero-trust stateful queue:
+
+```bash
+relay-broker -addr :8443 -auth-token my-token -max-ttl 10m
+```
+
+| Flag | Description |
+|---|---|
+| `-addr` | Listen address (default `:8443`) |
+| `-auth-token` | Required Bearer token |
+| `-max-ttl` | Intent TTL before silent deletion (default `5m`) |
+
+### Relay Operator
+
+The operator polls the broker, verifies plugin HMAC end-to-end, unwraps stanzas, and fulfills:
+
+```bash
+relay-operator \
+  --broker https://broker.example:8443 \
+  --identity keys.txt \
+  --tag QPg24g \
+  --hmac-key shared-with-plugin \
+  --auth-token broker-bearer-token \
+  --pull-interval 5s
+```
+
+| Flag | Env | Description |
+|---|---|---|
+| `--broker` | — | Broker URL (required) |
+| `--identity` | — | Age identity file (required) |
+| `--tag` | — | Routing tag to pull (required) |
+| `--hmac-key` | — | Shared HMAC key with plugin (required) |
+| `--auth-token` | `RELAY_BROKER_AUTH_TOKEN` | Broker Bearer token |
+| `--pull-interval` | — | Polling interval (default `5s`) |
+
 ## Relay Server
 
 The included `relay-server` supports TLS, mTLS, Bearer auth, and HMAC verification:
@@ -599,3 +754,6 @@ Flags and environment variables:
 | HMAC key compromised | Attacker can forge requests and replay. Does NOT compromise `encrypted_response` — ephemeral X25519 key agreement is independent of the HMAC key. |
 | Relay endpoint compromised | Attacker gets file keys — mitigated by using SOPS key groups (need both shares) |
 | Both relay + server compromised | Need physical access to all identity holders (geographic separation with YubiKeys) |
+| Broker compromised (async) | Broker holds no `hmac_key` or age identity. Cannot forge plugin requests or decrypt stanzas. Can DoS (drop intents), detected by plugin timeout. |
+| Ephemeral key substitution (async) | Prevented: ephemeral public key is bound in the HMAC signature. Operator re-verifies HMAC end-to-end on pull. |
+| Fabricated intent (async) | Broker or auth_token holder can submit payloads, but without `hmac_key` the operator rejects on HMAC verification. |

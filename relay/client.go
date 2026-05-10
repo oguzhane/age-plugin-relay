@@ -3,9 +3,11 @@ package relay
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,12 +19,34 @@ import (
 	"filippo.io/age"
 )
 
+// GenerateIntentID produces a random 16-byte hex string (32 chars) for use as
+// a plugin-generated intent ID in the async flow.
+func GenerateIntentID() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("generating intent ID: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+// asyncPollResponse is the broker's response to a poll action.
+type asyncPollResponse struct {
+	Status           string `json:"status"`
+	EncryptedFileKey string `json:"encrypted_file_key,omitempty"`
+	Error            string `json:"error,omitempty"`
+}
+
 // RelayRequest is the JSON body sent to the relay endpoint.
 type RelayRequest struct {
 	Version int           `json:"version"`
 	Action  string        `json:"action"`
 	Stream  bool          `json:"stream,omitempty"` // request SSE response
-	Stanzas []RelayStanza `json:"stanzas"`
+	Stanzas []RelayStanza `json:"stanzas,omitempty"`
+
+	// Async flow fields (Control Tower).
+	IntentID         string `json:"intent_id,omitempty"`          // plugin-generated, 16 random bytes hex
+	Tag              string `json:"tag,omitempty"`                // routing tag for operator pull
+	EncryptedFileKey string `json:"encrypted_file_key,omitempty"` // operator's sealed response (fulfill)
 }
 
 // RelayStanza is a single age stanza serialized for the relay protocol.
@@ -43,12 +67,22 @@ type RelayResponse struct {
 // PostToRelay sends inner stanzas to the relay URL and returns the unwrapped file key.
 // If the remote has Stream enabled and the server responds with text/event-stream,
 // the client parses SSE events until a "result" or "error" event arrives.
+//
+// If the server responds with 202 Accepted, the client switches to async polling
+// (Control Tower flow): it polls with the intent_id until the intent is fulfilled,
+// rejected, or the local timeout elapses.
 func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
+	intentID, err := GenerateIntentID()
+	if err != nil {
+		return nil, err
+	}
+
 	req := RelayRequest{
-		Version: 1,
-		Action:  "unwrap",
-		Stream:  remote.Stream,
-		Stanzas: make([]RelayStanza, len(stanzas)),
+		Version:  1,
+		Action:   "unwrap",
+		Stream:   remote.Stream,
+		IntentID: intentID,
+		Stanzas:  make([]RelayStanza, len(stanzas)),
 	}
 	for i, s := range stanzas {
 		req.Stanzas[i] = RelayStanza{
@@ -117,7 +151,17 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	// Dispatch based on response content type.
+	// 202 Accepted → async flow: switch to polling.
+	if resp.StatusCode == http.StatusAccepted {
+		return pollForResult(client, remote, intentID, token, hmacKey, ephemeral)
+	}
+
+	// 409 Conflict → duplicate intent_id, should not happen with random IDs.
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("broker rejected duplicate intent_id %s", intentID)
+	}
+
+	// Dispatch based on response content type (sync flow).
 	ct := resp.Header.Get("Content-Type")
 	var fileKey []byte
 	if strings.HasPrefix(ct, "text/event-stream") {
@@ -129,6 +173,94 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 		return nil, err
 	}
 	return fileKey, nil
+}
+
+// pollForResult polls the broker for the result of an async intent until
+// fulfilled, rejected, unknown (expired), or local timeout.
+func pollForResult(client *http.Client, remote RemoteConfig, intentID, token, hmacKey string, ephemeral *EphemeralKeypair) ([]byte, error) {
+	pollInterval := remote.PollIntervalDuration()
+	deadline := time.Now().Add(remote.TimeoutDuration())
+
+	for {
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("async intent %s timed out waiting for fulfillment", intentID)
+		}
+
+		time.Sleep(pollInterval)
+
+		pollReq := RelayRequest{
+			Version:  1,
+			Action:   "poll",
+			IntentID: intentID,
+		}
+		pollBody, err := json.Marshal(pollReq)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling poll request: %w", err)
+		}
+
+		httpReq, err := http.NewRequest("POST", remote.URL, bytes.NewReader(pollBody))
+		if err != nil {
+			return nil, fmt.Errorf("creating poll request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		// Sign poll requests with HMAC if configured.
+		if hmacKey != "" {
+			ts, nonce, sig, signErr := SignRequest([]byte(hmacKey), pollBody)
+			if signErr != nil {
+				return nil, fmt.Errorf("signing poll request: %w", signErr)
+			}
+			httpReq.Header.Set(HMACHeaderTimestamp, ts)
+			httpReq.Header.Set(HMACHeaderNonce, nonce)
+			httpReq.Header.Set(HMACHeaderSignature, sig)
+		}
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			// Transient network error — retry.
+			continue
+		}
+
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		// 404 → intent expired or unknown — terminal failure.
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("async intent %s: unknown or expired", intentID)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			// Unexpected status — retry.
+			continue
+		}
+
+		var pollResp asyncPollResponse
+		if err := json.Unmarshal(respBody, &pollResp); err != nil {
+			continue
+		}
+
+		switch pollResp.Status {
+		case "pending":
+			// Keep polling.
+			continue
+		case "fulfilled":
+			if ephemeral != nil && pollResp.EncryptedFileKey != "" {
+				return OpenFileKey(pollResp.EncryptedFileKey, ephemeral.PrivateKey)
+			}
+			return nil, fmt.Errorf("async intent %s: fulfilled but no encrypted_file_key", intentID)
+		case "rejected":
+			return nil, fmt.Errorf("async intent %s: rejected by operator", intentID)
+		default:
+			// Unknown status — retry.
+			continue
+		}
+	}
 }
 
 // readJSONResponse handles standard JSON responses (non-streaming).
