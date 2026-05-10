@@ -1,8 +1,8 @@
 // relay-broker is a zero-trust stateful queue that bridges age-plugin-relay
 // plugins and remote operators for async unwrap flows.
 //
-// The broker holds no HMAC key and no age identity. It stores opaque,
-// HMAC-signed payloads keyed by plugin-supplied intent IDs, indexed by tag.
+// The broker holds no age identity and no key material. It stores opaque,
+// encrypted payloads keyed by plugin-supplied intent IDs, indexed by tag.
 // Access control uses a single shared Bearer token.
 //
 // Usage:
@@ -96,7 +96,7 @@ func main() {
 
 		switch req.Action {
 		case "unwrap":
-			handleUnwrap(w, r, body, &req, queue)
+			handleUnwrap(w, body, &req, queue)
 		case "poll":
 			handlePoll(w, &req, queue)
 		case "pull":
@@ -119,31 +119,15 @@ func main() {
 }
 
 // handleUnwrap queues a plugin's unwrap request and returns 202.
-func handleUnwrap(w http.ResponseWriter, r *http.Request, body []byte, req *relay.RelayRequest, q *broker.Queue) {
+func handleUnwrap(w http.ResponseWriter, body []byte, req *relay.RelayRequest, q *broker.Queue) {
 	if req.IntentID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
 	}
 
-	// Extract tag from the first stanza for routing.
-	tag := ""
-	if len(req.Stanzas) > 0 && len(req.Stanzas[0].Args) > 0 {
-		// In the relay protocol, stanzas may carry the tag as part of Args.
-		// But in the broker flow, plugin sends inner stanzas (tag already stripped).
-		// We use the tag field from the request if present, otherwise derive from stanza type.
-	}
-	if req.Tag != "" {
-		tag = req.Tag
-	}
+	tag := req.Tag
 
-	headers := broker.PluginHeaders{
-		Timestamp:    r.Header.Get(relay.HMACHeaderTimestamp),
-		Nonce:        r.Header.Get(relay.HMACHeaderNonce),
-		Signature:    r.Header.Get(relay.HMACHeaderSignature),
-		EphemeralKey: r.Header.Get(relay.EnvelopeHeader),
-	}
-
-	if err := q.Submit(req.IntentID, tag, body, headers); err != nil {
+	if err := q.Submit(req.IntentID, tag, body); err != nil {
 		if err.Error() == "duplicate_intent" {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "duplicate_intent"})
 			return
@@ -185,18 +169,18 @@ func handlePull(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Queue)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleFulfill marks an intent as fulfilled with the operator's encrypted file key.
+// handleFulfill marks an intent as fulfilled with the operator's encrypted payload.
 func handleFulfill(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Queue) {
 	if req.IntentID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
 	}
-	if req.EncryptedFileKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing encrypted_file_key"})
+	if req.EncryptedPayload == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing encrypted_payload"})
 		return
 	}
 
-	if err := q.Fulfill(req.IntentID, req.EncryptedFileKey); err != nil {
+	if err := q.Fulfill(req.IntentID, req.EncryptedPayload); err != nil {
 		switch err.Error() {
 		case "unknown_intent":
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})

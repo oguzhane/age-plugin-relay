@@ -1,69 +1,83 @@
 package relay
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"testing"
 )
 
-func TestSealOpenFileKey(t *testing.T) {
+func TestSealOpenResponse(t *testing.T) {
 	client, err := GenerateEphemeral()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Clear()
 
-	fileKey := make([]byte, 16)
-	rand.Read(fileKey)
-
-	sealed, err := SealFileKey(fileKey, client.PublicKey)
-	if err != nil {
-		t.Fatalf("SealFileKey: %v", err)
+	inner := InnerResponsePayload{
+		Nonce:     "deadbeef01020304deadbeef01020304",
+		OuterHash: "abcdef1234567890",
+		FileKey:   base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef")),
 	}
 
-	recovered, err := OpenFileKey(sealed, client.PrivateKey)
+	sealed, err := SealResponse(inner, client.PublicKey)
 	if err != nil {
-		t.Fatalf("OpenFileKey: %v", err)
+		t.Fatalf("SealResponse: %v", err)
 	}
 
-	if !bytes.Equal(recovered, fileKey) {
-		t.Fatalf("file key mismatch:\n  got:  %x\n  want: %x", recovered, fileKey)
+	recovered, err := OpenResponse(sealed, client.PrivateKey)
+	if err != nil {
+		t.Fatalf("OpenResponse: %v", err)
+	}
+
+	if recovered.Nonce != inner.Nonce {
+		t.Errorf("nonce mismatch: %q != %q", recovered.Nonce, inner.Nonce)
+	}
+	if recovered.OuterHash != inner.OuterHash {
+		t.Errorf("outer_hash mismatch: %q != %q", recovered.OuterHash, inner.OuterHash)
+	}
+	if recovered.FileKey != inner.FileKey {
+		t.Errorf("file_key mismatch: %q != %q", recovered.FileKey, inner.FileKey)
 	}
 }
 
-func TestOpenWrongKey(t *testing.T) {
+func TestOpenResponseWrongKey(t *testing.T) {
 	client, _ := GenerateEphemeral()
 	other, _ := GenerateEphemeral()
 
-	fileKey := make([]byte, 16)
-	rand.Read(fileKey)
+	inner := InnerResponsePayload{
+		Nonce:     "deadbeef01020304deadbeef01020304",
+		OuterHash: "hash",
+		FileKey:   "ZmlsZWtleQ",
+	}
 
-	sealed, _ := SealFileKey(fileKey, client.PublicKey)
+	sealed, _ := SealResponse(inner, client.PublicKey)
 
-	_, err := OpenFileKey(sealed, other.PrivateKey)
+	_, err := OpenResponse(sealed, other.PrivateKey)
 	if err == nil {
 		t.Fatal("expected error when opening with wrong key")
 	}
 }
 
-func TestOpenTruncated(t *testing.T) {
-	_, err := OpenFileKey("dG9vc2hvcnQ", [32]byte{})
+func TestOpenResponseTruncated(t *testing.T) {
+	_, err := OpenResponse("dG9vc2hvcnQ", [32]byte{})
 	if err == nil {
 		t.Fatal("expected error for truncated sealed data")
 	}
 }
 
-func TestSealDifferentEachTime(t *testing.T) {
+func TestSealResponseDifferentEachTime(t *testing.T) {
 	client, _ := GenerateEphemeral()
-	fileKey := make([]byte, 16)
-	rand.Read(fileKey)
+	inner := InnerResponsePayload{
+		Nonce:     "deadbeef01020304deadbeef01020304",
+		OuterHash: "hash",
+		FileKey:   "ZmlsZWtleQ",
+	}
 
-	sealed1, _ := SealFileKey(fileKey, client.PublicKey)
-	sealed2, _ := SealFileKey(fileKey, client.PublicKey)
+	sealed1, _ := SealResponse(inner, client.PublicKey)
+	sealed2, _ := SealResponse(inner, client.PublicKey)
 
 	if sealed1 == sealed2 {
-		t.Fatal("two seals of the same file key should differ (different server ephemerals + nonces)")
+		t.Fatal("two seals should differ (different server ephemerals + nonces)")
 	}
 }
 
@@ -76,49 +90,29 @@ func TestEphemeralClear(t *testing.T) {
 	}
 }
 
-func TestSealOpenVariousSizes(t *testing.T) {
-	// age file keys are always 16 bytes, but test boundary sizes for robustness.
-	for _, size := range []int{0, 1, 15, 16, 32, 64, 256} {
-		client, _ := GenerateEphemeral()
-		data := make([]byte, size)
-		rand.Read(data)
-
-		sealed, err := SealFileKey(data, client.PublicKey)
-		if err != nil {
-			t.Fatalf("SealFileKey (size=%d): %v", size, err)
-		}
-
-		recovered, err := OpenFileKey(sealed, client.PrivateKey)
-		if err != nil {
-			t.Fatalf("OpenFileKey (size=%d): %v", size, err)
-		}
-
-		if !bytes.Equal(recovered, data) {
-			t.Fatalf("round-trip mismatch (size=%d)", size)
-		}
-	}
-}
-
-func TestOpenBadBase64(t *testing.T) {
-	_, err := OpenFileKey("not-valid-base64!!!@@@", [32]byte{})
+func TestOpenResponseBadBase64(t *testing.T) {
+	_, err := OpenResponse("not-valid-base64!!!@@@", [32]byte{})
 	if err == nil {
 		t.Fatal("expected error for invalid base64")
 	}
 }
 
-func TestOpenTamperedCiphertext(t *testing.T) {
+func TestOpenResponseTamperedCiphertext(t *testing.T) {
 	client, _ := GenerateEphemeral()
-	fileKey := make([]byte, 16)
-	rand.Read(fileKey)
+	inner := InnerResponsePayload{
+		Nonce:     "deadbeef01020304deadbeef01020304",
+		OuterHash: "hash",
+		FileKey:   "ZmlsZWtleQ",
+	}
 
-	sealed, _ := SealFileKey(fileKey, client.PublicKey)
+	sealed, _ := SealResponse(inner, client.PublicKey)
 
 	// Decode, flip a byte in the ciphertext area, re-encode.
 	raw, _ := base64.RawStdEncoding.DecodeString(sealed)
 	raw[len(raw)-1] ^= 0xFF
 	tampered := base64.RawStdEncoding.EncodeToString(raw)
 
-	_, err := OpenFileKey(tampered, client.PrivateKey)
+	_, err := OpenResponse(tampered, client.PrivateKey)
 	if err == nil {
 		t.Fatal("expected error for tampered ciphertext")
 	}
@@ -140,5 +134,34 @@ func TestEphemeralKeypairsAreUnique(t *testing.T) {
 			t.Fatalf("duplicate public key on iteration %d", i)
 		}
 		seen[ek.PublicKey] = true
+	}
+}
+
+func TestSealOpenResponseVariousSizes(t *testing.T) {
+	// Test with various file key sizes for robustness.
+	for _, size := range []int{0, 1, 15, 16, 32, 64} {
+		client, _ := GenerateEphemeral()
+		data := make([]byte, size)
+		rand.Read(data)
+
+		inner := InnerResponsePayload{
+			Nonce:     "deadbeef01020304deadbeef01020304",
+			OuterHash: "hash",
+			FileKey:   base64.RawStdEncoding.EncodeToString(data),
+		}
+
+		sealed, err := SealResponse(inner, client.PublicKey)
+		if err != nil {
+			t.Fatalf("SealResponse (size=%d): %v", size, err)
+		}
+
+		recovered, err := OpenResponse(sealed, client.PrivateKey)
+		if err != nil {
+			t.Fatalf("OpenResponse (size=%d): %v", size, err)
+		}
+
+		if recovered.FileKey != inner.FileKey {
+			t.Fatalf("round-trip mismatch (size=%d)", size)
+		}
 	}
 }

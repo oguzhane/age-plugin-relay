@@ -38,7 +38,7 @@ func (q *Queue) Stop() {
 }
 
 // Submit stores a new intent. Returns an error if the intent_id already exists (409).
-func (q *Queue) Submit(intentID, tag string, requestBody []byte, headers PluginHeaders) error {
+func (q *Queue) Submit(intentID, tag string, requestBody []byte) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -47,12 +47,11 @@ func (q *Queue) Submit(intentID, tag string, requestBody []byte, headers PluginH
 	}
 
 	q.intents[intentID] = &Intent{
-		IntentID:      intentID,
-		Tag:           tag,
-		Request:       requestBody,
-		PluginHeaders: headers,
-		Status:        StatusPending,
-		CreatedAt:     time.Now(),
+		IntentID:  intentID,
+		Tag:       tag,
+		Request:   requestBody,
+		Status:    StatusPending,
+		CreatedAt: time.Now(),
 	}
 	return nil
 }
@@ -78,14 +77,13 @@ func (q *Queue) Poll(intentID string) *PollResponse {
 		Status: string(intent.Status),
 	}
 	if intent.Status == StatusFulfilled {
-		resp.EncryptedFileKey = intent.EncryptedFileKey
+		resp.EncryptedPayload = intent.EncryptedPayload
 	}
 	return resp
 }
 
 // Pull returns all pending intents matching the given tag. The request body is
-// returned verbatim alongside the plugin's original HMAC headers so the operator
-// can verify the plugin's signature end-to-end.
+// returned verbatim so the operator can decrypt and verify the encrypted payload.
 func (q *Queue) Pull(tag string) *PullResponse {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -113,18 +111,17 @@ func (q *Queue) Pull(tag string) *PullResponse {
 		}
 
 		resp.Intents = append(resp.Intents, PullIntent{
-			IntentID:      intent.IntentID,
-			Request:       req,
-			PluginHeaders: intent.PluginHeaders,
+			IntentID: intent.IntentID,
+			Request:  req,
 		})
 	}
 
 	return resp
 }
 
-// Fulfill marks an intent as fulfilled with the operator's encrypted file key.
+// Fulfill marks an intent as fulfilled with the operator's encrypted payload.
 // Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Fulfill(intentID, encryptedFileKey string) error {
+func (q *Queue) Fulfill(intentID, encryptedPayload string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -143,7 +140,7 @@ func (q *Queue) Fulfill(intentID, encryptedFileKey string) error {
 	}
 
 	intent.Status = StatusFulfilled
-	intent.EncryptedFileKey = encryptedFileKey
+	intent.EncryptedPayload = encryptedPayload
 	return nil
 }
 

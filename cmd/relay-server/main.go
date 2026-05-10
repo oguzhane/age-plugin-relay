@@ -1,9 +1,11 @@
 // relay-server is a minimal HTTP server that unwraps age stanzas using a local
-// identity file. It implements the age-plugin-relay HTTP contract.
+// identity file. It implements the age-plugin-relay HTTP contract with mandatory
+// encrypted payload — all requests contain age-encrypted inner payloads, all
+// responses are NaCl box sealed.
 //
 // Usage:
 //
-//	relay-server -identity keys.txt [-addr :9876] [-tls-cert cert.pem -tls-key key.pem] [-tls-ca ca.pem] [-auth-token TOKEN] [-hmac-key KEY]
+//	relay-server -identity keys.txt [-addr :9876] [-tls-cert cert.pem -tls-key key.pem] [-tls-ca ca.pem] [-auth-token TOKEN]
 package main
 
 import (
@@ -17,8 +19,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"filippo.io/age"
 
@@ -32,7 +32,6 @@ func main() {
 	tlsKey := ""
 	tlsCA := ""
 	authToken := ""
-	hmacKey := ""
 
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -66,56 +65,24 @@ func main() {
 			if i < len(os.Args) {
 				authToken = os.Args[i]
 			}
-		case "-hmac-key":
-			i++
-			if i < len(os.Args) {
-				hmacKey = os.Args[i]
-			}
 		}
 	}
 
 	if identityFile == "" {
 		fmt.Fprintf(os.Stderr, "Usage: relay-server -identity <file> [-addr :9876] [options]\n")
 		fmt.Fprintf(os.Stderr, "\nMinimal relay server for age-plugin-relay.\n")
-		fmt.Fprintf(os.Stderr, "Serves POST /unwrap — receives age stanzas, unwraps with local identity, returns file key.\n")
+		fmt.Fprintf(os.Stderr, "Serves POST /unwrap — receives encrypted payload, decrypts, unwraps stanzas, returns sealed file key.\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		fmt.Fprintf(os.Stderr, "  -tls-cert <file>    TLS server certificate (enables HTTPS)\n")
 		fmt.Fprintf(os.Stderr, "  -tls-key <file>     TLS server private key (required with -tls-cert)\n")
 		fmt.Fprintf(os.Stderr, "  -tls-ca <file>      CA certificate for client verification (enables mTLS)\n")
 		fmt.Fprintf(os.Stderr, "  -auth-token <token>  Required Bearer token for all requests\n")
-		fmt.Fprintf(os.Stderr, "  -hmac-key <key>      HMAC-SHA256 shared key for request signing + replay protection\n")
 		os.Exit(1)
 	}
 
 	// Auth token from flag or env.
 	if authToken == "" {
 		authToken = os.Getenv("RELAY_AUTH_TOKEN")
-	}
-
-	// HMAC key from flag or env.
-	if hmacKey == "" {
-		hmacKey = os.Getenv("RELAY_HMAC_KEY")
-	}
-
-	// Nonce cache for HMAC replay protection.
-	var (
-		nonceMu    sync.Mutex
-		seenNonces = make(map[string]time.Time)
-	)
-	if hmacKey != "" {
-		go func() {
-			for {
-				time.Sleep(relay.HMACMaxDrift)
-				nonceMu.Lock()
-				now := time.Now()
-				for k, t := range seenNonces {
-					if now.Sub(t) > relay.HMACMaxDrift {
-						delete(seenNonces, k)
-					}
-				}
-				nonceMu.Unlock()
-			}
-		}()
 	}
 
 	identities, err := loadIdentities(identityFile)
@@ -146,46 +113,13 @@ func main() {
 			return
 		}
 
-		// HMAC signature verification (optional).
-		if hmacKey != "" {
-			sig := r.Header.Get(relay.HMACHeaderSignature)
-			ts := r.Header.Get(relay.HMACHeaderTimestamp)
-			nonce := r.Header.Get(relay.HMACHeaderNonce)
-			ephKey := r.Header.Get(relay.EnvelopeHeader)
-			if sig == "" || ts == "" || nonce == "" {
-				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "missing HMAC signature headers"})
-				return
-			}
-			if err := relay.ValidateTimestamp(ts); err != nil {
-				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: " + err.Error()})
-				return
-			}
-			if err := relay.VerifySignature([]byte(hmacKey), ts, nonce, body, sig, ephKey); err != nil {
-				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: " + err.Error()})
-				return
-			}
-			// Reject replayed nonces.
-			nonceMu.Lock()
-			if _, seen := seenNonces[nonce]; seen {
-				nonceMu.Unlock()
-				writeJSON(w, http.StatusUnauthorized, relay.RelayResponse{Error: "HMAC: duplicate nonce"})
-				return
-			}
-			seenNonces[nonce] = time.Now()
-			nonceMu.Unlock()
-		}
-
 		var req relay.RelayRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "invalid JSON: " + err.Error()})
 			return
 		}
 
-		fmt.Fprintf(os.Stderr, "[relay-server] Received %d stanza(s)", len(req.Stanzas))
-		if len(req.Stanzas) > 0 {
-			fmt.Fprintf(os.Stderr, ", type=%s", req.Stanzas[0].Type)
-		}
-		fmt.Fprintf(os.Stderr, ", action=%s, stream=%v, version=%d\n", req.Action, req.Stream, req.Version)
+		fmt.Fprintf(os.Stderr, "[relay-server] Received action=%s, version=%d, stream=%v\n", req.Action, req.Version, req.Stream)
 
 		if req.Version != 1 {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: fmt.Sprintf("unsupported protocol version: %d", req.Version)})
@@ -197,9 +131,27 @@ func main() {
 			return
 		}
 
-		// Convert to age.Stanza
-		stanzas := make([]*age.Stanza, len(req.Stanzas))
-		for i, s := range req.Stanzas {
+		if req.EncryptedPayload == "" {
+			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "missing encrypted_payload"})
+			return
+		}
+
+		// 1. Decrypt the encrypted payload using our identity.
+		inner, err := relay.DecryptPayload(req.EncryptedPayload, identities)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "decrypting payload: " + err.Error()})
+			return
+		}
+
+		// 2. Verify outer hash and expiry.
+		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "payload verification: " + err.Error()})
+			return
+		}
+
+		// 3. Extract stanzas and ephemeral key.
+		stanzas := make([]*age.Stanza, len(inner.Stanzas))
+		for i, s := range inner.Stanzas {
 			bodyBytes, err := base64.RawStdEncoding.DecodeString(s.Body)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "invalid stanza body: " + err.Error()})
@@ -212,33 +164,36 @@ func main() {
 			}
 		}
 
-		// Try each identity
+		ephKeyBytes, err := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
+		if err != nil || len(ephKeyBytes) != 32 {
+			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "invalid ephemeral key in payload"})
+			return
+		}
+		var clientPub [32]byte
+		copy(clientPub[:], ephKeyBytes)
+
+		// 4. Try each identity to unwrap.
 		for _, id := range identities {
 			fileKey, err := id.Unwrap(stanzas)
 			if err == nil {
-				fmt.Fprintf(os.Stderr, "[relay-server] Unwrap succeeded, returning file key\n")
+				fmt.Fprintf(os.Stderr, "[relay-server] Unwrap succeeded, sealing response\n")
 
-				resp := relay.RelayResponse{}
-				ephKeyB64 := r.Header.Get(relay.EnvelopeHeader)
-				if ephKeyB64 != "" {
-					// Encrypt the file key to the client's ephemeral public key.
-					ephKeyBytes, err := base64.RawStdEncoding.DecodeString(ephKeyB64)
-					if err != nil || len(ephKeyBytes) != 32 {
-						writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "invalid ephemeral key"})
-						return
-					}
-					var clientPub [32]byte
-					copy(clientPub[:], ephKeyBytes)
-					sealed, err := relay.SealFileKey(fileKey, clientPub)
-					if err != nil {
-						writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "sealing file key"})
-						return
-					}
-					resp.EncryptedFileKey = sealed
-					clear(fileKey)
-				} else {
-					resp.FileKey = base64.RawStdEncoding.EncodeToString(fileKey)
+				// 5. Build response inner payload.
+				respInner, err := relay.BuildResponsePayload(req.IntentID, fileKey)
+				clear(fileKey)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "building response payload"})
+					return
 				}
+
+				// 6. Seal with NaCl box to plugin's ephemeral key.
+				sealed, err := relay.SealResponse(*respInner, clientPub)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "sealing response"})
+					return
+				}
+
+				resp := relay.RelayResponse{EncryptedPayload: sealed}
 
 				if req.Stream {
 					writeSSE(w, "result", resp)
@@ -263,7 +218,6 @@ func main() {
 			MinVersion: tls.VersionTLS12,
 		}
 
-		// If CA is provided, require and verify client certs (mTLS).
 		if tlsCA != "" {
 			caCert, err := os.ReadFile(tlsCA)
 			if err != nil {
@@ -290,8 +244,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "[relay-server] WARNING: TLS not configured — file keys will be transmitted in plaintext!\n")
-		fmt.Fprintf(os.Stderr, "[relay-server] Use -tls-cert and -tls-key for production deployments.\n")
+		fmt.Fprintf(os.Stderr, "[relay-server] WARNING: TLS not configured — use -tls-cert and -tls-key for production.\n")
 		fmt.Fprintf(os.Stderr, "[relay-server] Listening on %s (plaintext HTTP)\n", addr)
 		if err := http.ListenAndServe(addr, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

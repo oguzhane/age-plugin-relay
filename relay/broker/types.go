@@ -1,9 +1,9 @@
 // Package broker provides the in-memory intent queue for the relay broker.
 //
-// The broker is a zero-trust stateful queue that stores opaque, HMAC-signed
+// The broker is a zero-trust stateful queue that stores opaque, encrypted
 // payloads keyed by plugin-supplied intent IDs and indexed by tag. It holds
-// no HMAC key and no age identity — it cannot read or verify the cryptographic
-// content of any intent.
+// no age identity and no key material — it cannot read or verify the
+// cryptographic content of any intent.
 package broker
 
 import (
@@ -33,35 +33,21 @@ type Intent struct {
 	// Request is the original plugin POST body, stored verbatim.
 	Request []byte
 
-	// PluginHeaders contains the plugin's HMAC headers, forwarded to the
-	// operator so it can verify the plugin's signature end-to-end.
-	PluginHeaders PluginHeaders
-
 	// Status is the current lifecycle state.
 	Status Status
 
-	// EncryptedFileKey is set when the operator fulfills the intent.
-	// Opaque to the broker — sealed via NaCl box to the plugin's ephemeral key.
-	EncryptedFileKey string
+	// EncryptedPayload is set when the operator fulfills the intent.
+	// Opaque to the broker — NaCl box sealed to the plugin's ephemeral key.
+	EncryptedPayload string
 
 	// CreatedAt is when the broker received the intent. Used for TTL enforcement.
 	CreatedAt time.Time
 }
 
-// PluginHeaders holds the HMAC and envelope headers from the plugin's original
-// request. The broker stores and forwards these verbatim; it cannot verify them.
-type PluginHeaders struct {
-	Timestamp    string `json:"X-Relay-Timestamp"`
-	Nonce        string `json:"X-Relay-Nonce"`
-	Signature    string `json:"X-Relay-Signature"`
-	EphemeralKey string `json:"X-Relay-Ephemeral-Key,omitempty"`
-}
-
 // PullIntent is a single intent as returned to the operator on a pull request.
 type PullIntent struct {
-	IntentID      string            `json:"intent_id"`
-	Request       relay.RelayRequest `json:"request"`
-	PluginHeaders PluginHeaders     `json:"plugin_headers"`
+	IntentID string             `json:"intent_id"`
+	Request  relay.RelayRequest `json:"request"`
 }
 
 // PullResponse is the broker's response to an operator pull request.
@@ -72,7 +58,7 @@ type PullResponse struct {
 // PollResponse is the broker's response to a plugin poll request.
 type PollResponse struct {
 	Status           string `json:"status"`
-	EncryptedFileKey string `json:"encrypted_file_key,omitempty"`
+	EncryptedPayload string `json:"encrypted_payload,omitempty"`
 }
 
 // AsyncAccepted is the broker's 202 response to a plugin unwrap request

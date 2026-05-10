@@ -1,26 +1,18 @@
 // Package relay — envelope.go provides ephemeral X25519 response encryption.
 //
-// When enabled, the client generates a per-request X25519 keypair, sends the
-// public key in X-Relay-Ephemeral-Key, and the server encrypts the file key
-// response using NaCl box (X25519 + XSalsa20-Poly1305).
-//
-// The ephemeral key MUST be included in the HMAC signature to prevent
-// key substitution attacks. This means hmac_key is a prerequisite for
-// encrypted_response.
+// The operator seals an InnerResponsePayload (containing the file key) using
+// NaCl box (X25519 + XSalsa20-Poly1305) to the plugin's ephemeral public key.
+// The plugin opens the sealed response with its ephemeral private key.
 package relay
 
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
-)
-
-const (
-	// EnvelopeHeader is the HTTP header carrying the client's ephemeral public key.
-	EnvelopeHeader = "X-Relay-Ephemeral-Key"
 )
 
 // EphemeralKeypair holds a per-request X25519 keypair for response encryption.
@@ -43,12 +35,17 @@ func (ek *EphemeralKeypair) Clear() {
 	clear(ek.PrivateKey[:])
 }
 
-// SealFileKey encrypts a file key to the client's ephemeral public key.
-// Called by the server. Uses an ephemeral server keypair per response so the
-// sealed box is unique even for identical file keys.
+// SealResponse encrypts an InnerResponsePayload to the client's ephemeral public
+// key. Called by the operator/server. Uses an ephemeral server keypair per
+// response so the sealed box is unique even for identical payloads.
 //
-// Returns base64-encoded: serverPub(32) || nonce(24) || ciphertext(16+box.Overhead).
-func SealFileKey(fileKey []byte, clientPub [32]byte) (string, error) {
+// Returns base64-encoded: serverPub(32) || nonce(24) || ciphertext.
+func SealResponse(inner InnerResponsePayload, clientPub [32]byte) (string, error) {
+	plaintext, err := json.Marshal(inner)
+	if err != nil {
+		return "", fmt.Errorf("marshaling inner response: %w", err)
+	}
+
 	// Generate a one-time server keypair for this response.
 	serverPub, serverPriv, err := box.GenerateKey(rand.Reader)
 	if err != nil {
@@ -61,7 +58,7 @@ func SealFileKey(fileKey []byte, clientPub [32]byte) (string, error) {
 		return "", fmt.Errorf("generating nonce: %w", err)
 	}
 
-	sealed := box.Seal(nil, fileKey, &nonce, &clientPub, serverPriv)
+	sealed := box.Seal(nil, plaintext, &nonce, &clientPub, serverPriv)
 
 	// Wire format: serverPub(32) || nonce(24) || sealed
 	out := make([]byte, 0, 32+24+len(sealed))
@@ -72,18 +69,19 @@ func SealFileKey(fileKey []byte, clientPub [32]byte) (string, error) {
 	return base64.RawStdEncoding.EncodeToString(out), nil
 }
 
-// OpenFileKey decrypts a sealed file key using the client's ephemeral private key.
-// Called by the client. Parses: serverPub(32) || nonce(24) || ciphertext.
-func OpenFileKey(sealed string, clientPriv [32]byte) ([]byte, error) {
+// OpenResponse decrypts a sealed InnerResponsePayload using the client's
+// ephemeral private key. Called by the plugin.
+// Parses: serverPub(32) || nonce(24) || ciphertext.
+func OpenResponse(sealed string, clientPriv [32]byte) (*InnerResponsePayload, error) {
 	defer clear(clientPriv[:])
 
 	raw, err := base64.RawStdEncoding.DecodeString(sealed)
 	if err != nil {
-		return nil, fmt.Errorf("decoding sealed file key: %w", err)
+		return nil, fmt.Errorf("decoding sealed response: %w", err)
 	}
 
 	if len(raw) < 32+24+box.Overhead {
-		return nil, fmt.Errorf("sealed file key too short (%d bytes)", len(raw))
+		return nil, fmt.Errorf("sealed response too short (%d bytes)", len(raw))
 	}
 
 	var serverPub [32]byte
@@ -92,11 +90,16 @@ func OpenFileKey(sealed string, clientPriv [32]byte) ([]byte, error) {
 	copy(nonce[:], raw[32:56])
 	ciphertext := raw[56:]
 
-	fileKey, ok := box.Open(nil, ciphertext, &nonce, &serverPub, &clientPriv)
+	plaintext, ok := box.Open(nil, ciphertext, &nonce, &serverPub, &clientPriv)
 	if !ok {
-		return nil, fmt.Errorf("decrypting sealed file key failed (authentication error)")
+		return nil, fmt.Errorf("decrypting sealed response failed (authentication error)")
 	}
-	return fileKey, nil
+
+	var inner InnerResponsePayload
+	if err := json.Unmarshal(plaintext, &inner); err != nil {
+		return nil, fmt.Errorf("parsing inner response payload: %w", err)
+	}
+	return &inner, nil
 }
 
 // DerivePublicKey derives the X25519 public key from a private key.

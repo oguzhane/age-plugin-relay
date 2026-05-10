@@ -2,6 +2,8 @@
 
 An [age](https://age-encryption.org) plugin that decouples the **location** of age identities from the encryption/decryption process. It acts as a router — any age identity (X25519, YubiKey, hybrid PQ, or other plugins) can be used remotely through an HTTP relay endpoint.
 
+All payloads are encrypted end-to-end. The broker/relay sees only opaque ciphertext and routing metadata.
+
 ## How It Works
 
 ```
@@ -16,15 +18,15 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
   age.ParseRecipients() -> Wrap()               Match stanzas by tag, reconstruct inner stanzas
     |                                             |
     v                                             v
-  Re-tag stanza: X25519 -> relay                Resolve target (URL or remote name from config)
+  Re-tag stanza: X25519 -> relay                Resolve target (remote name from config)
     |                                             |
     v                                             v
-  Done. No network. Identity-agnostic.          HTTP POST inner stanzas -> file key returned
+  Done. No network. Identity-agnostic.          Build encrypted payload → HTTP POST → decrypt response
 ```
 
 **Encryption** uses only the inner recipient's public key — no relay, no network, no hardware. The plugin delegates to `age.ParseRecipients()`, so it works with any recipient type the `age` library (or plugins in `PATH`) can parse.
 
-**Decryption** forwards the encrypted stanzas to a relay endpoint over HTTP(S). What serves that endpoint is not the plugin's concern — it could be a simple agent, a gateway with an approval UI, a serverless function, etc.
+**Decryption** builds an encrypted inner payload (age-encrypted to the operator's recipient), sends it to the relay endpoint, and decrypts the NaCl box sealed response. The relay/broker never sees plaintext stanzas or file keys.
 
 ## Install
 
@@ -47,34 +49,22 @@ export PATH="/path/to/age-plugin-relay:$PATH"
 
 ### Generate a relay recipient and identity
 
-**Legacy mode** (URL embedded in identity):
-
-```bash
-age-plugin-relay --generate \
-  --inner-recipient "age1abc..." \
-  --relay-url "https://relay.example:8443/unwrap"
-```
-
-**Config mode** (remote name, resolved from `relay-config.yaml`):
-
 ```bash
 age-plugin-relay --generate \
   --inner-recipient "age1abc..." \
   --remote myserver
 ```
 
-Config mode produces shorter identity strings and supports per-remote TLS and timeout. See [Config File](#config-file) below.
+Config mode produces short identity strings and supports per-remote TLS, timeout, and `unwrap_recipient`. See [Config File](#config-file) below.
 
 Output:
 
 ```
 # Relay recipient (for encryption — add to .sops.yaml or age -r):
 #   Inner: age1abc...
-#   Relay: https://relay.example:8443/unwrap
 age1relay1q...
 
 # Relay identity (for decryption — add to identity file):
-#   Relay: https://relay.example:8443/unwrap
 AGE-PLUGIN-RELAY-1...
 ```
 
@@ -109,7 +99,7 @@ Where `identities.txt` contains:
 AGE-PLUGIN-RELAY-1...
 ```
 
-The plugin sends the encrypted stanzas to the relay URL and returns the unwrapped file key.
+The plugin builds an encrypted payload containing the stanzas and an ephemeral key, sends it to the relay endpoint, and decrypts the sealed response to recover the file key.
 
 ### Use with SOPS key groups
 
@@ -147,18 +137,16 @@ The Bech32 data payload is the UTF-8 bytes of the inner age recipient string. Th
 
 ### Identity: `AGE-PLUGIN-RELAY-1<bech32(tag || target)>`
 
-The target is either a full URL (legacy) or a remote name (config mode).
+The target is a remote name resolved from `relay-config.yaml`.
 
 | Field | Size | Description |
 |---|---|---|
 | `tag` | 16 bytes | `SHA-256(inner_recipient_string)[:16]` — matches stanzas to this identity |
-| `target` | variable | URL (`https://...`) or remote name (`myserver`) |
+| `target` | variable | Remote name (`myserver`) |
 
 Not secret. Contains no key material — only routing information. Safe to commit to version control.
 
-At decrypt time, the plugin detects the target type:
-- Starts with `http://` or `https://` → use as relay URL directly (legacy)
-- Anything else → look up in `relay-config.yaml` (config mode)
+At decrypt time, the plugin looks up the target in `relay-config.yaml` to get the URL, `unwrap_recipient`, and other settings.
 
 ### Stanza format
 
@@ -180,13 +168,13 @@ X0e7a90Lzp8lnpGBH7JdWnpW+WcH61T4obAXzVHa6N8
 | `X25519` | Original inner stanza type |
 | `CKTw...` | Original inner stanza arguments (passed through) |
 
-On decryption the plugin strips `relay` and the tag, reconstructs the original inner stanza, and forwards it to the relay endpoint.
+On decryption the plugin strips `relay` and the tag, reconstructs the original inner stanza, and forwards it (inside an encrypted payload) to the relay endpoint.
 
 ## Relay Endpoint HTTP Contract
 
-The plugin POSTs to the relay URL during decryption. What serves that URL is entirely decoupled from the plugin. The URL is opaque to the plugin — the intent is conveyed by the `action` field in the payload.
+The plugin POSTs to the relay URL during decryption. All payloads are encrypted end-to-end — the relay/broker only sees opaque ciphertext and routing metadata.
 
-### Request
+### Request (outer envelope)
 
 ```http
 POST / HTTP/1.1
@@ -195,21 +183,37 @@ Content-Type: application/json
 {
   "version": 1,
   "action": "unwrap",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+  "tag": "QPg24g",
+  "expires_at": 1715350800,
   "stream": true,
-  "stanzas": [
-    {
-      "type": "X25519",
-      "args": ["CKTwCgeHBEBFmdC7GJSffbto8y+8G8iPHhTeMnhxIg4"],
-      "body": "X0e7a90Lzp8lnpGBH7JdWnpW+WcH61T4obAXzVHa6N8"
-    }
-  ]
+  "encrypted_payload": "<base64: age-encrypted blob>"
 }
 ```
 
 - `version`: Protocol version (currently `1`).
 - `action`: The operation to perform. Defined actions: `"unwrap"`, `"poll"`, `"pull"`, `"fulfill"`, `"reject"`. See [Control Tower (Async Flow)](#control-tower-async-flow) for the async actions.
+- `intent_id`: Plugin-generated unique ID (16 random bytes, hex-encoded).
+- `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:4]`, base64).
+- `expires_at`: Unix timestamp (seconds) — intent expiry.
 - `stream`: Optional. If `true`, the client accepts SSE responses. See [Streaming (SSE)](#streaming-sse).
-- `stanzas`: Array of inner stanzas with the relay wrapping stripped. The `body` field is base64 raw standard encoded.
+- `encrypted_payload`: age-encrypted inner payload containing stanzas, ephemeral key, outer hash, and nonce. Opaque to the broker.
+
+### Inner request payload (age-encrypted to operator's recipient)
+
+```json
+{
+  "nonce": "<16 random bytes, hex>",
+  "outer_hash": "<SHA-256(version.action.intent_id.tag.expires_at), hex>",
+  "expires_at": 1715350800,
+  "stanzas": [
+    { "type": "X25519", "args": ["..."], "body": "..." }
+  ],
+  "ephemeral_key": "<base64: X25519 ephemeral public key>"
+}
+```
+
+The `outer_hash` binds the encrypted payload to the cleartext routing fields. The operator recomputes it from the outer fields and rejects on mismatch (tamper detection).
 
 ### Response
 
@@ -217,17 +221,17 @@ Content-Type: application/json
 
 ```json
 {
-  "file_key": "dGVzdGtleS4uLi4uLi4u"
+  "encrypted_payload": "<base64: NaCl box sealed inner response>"
 }
 ```
 
-`file_key` is the 16-byte age file key, base64 raw standard encoded.
-
-When [encrypted response](#encrypted-response-ephemeral-x25519) is active, the server returns `encrypted_file_key` instead:
+The `encrypted_payload` contains a NaCl box (X25519 + XSalsa20-Poly1305) sealed to the plugin's ephemeral key. The inner response is:
 
 ```json
 {
-  "encrypted_file_key": "<base64: serverPub(32) || nonce(24) || NaCl box ciphertext>"
+  "nonce": "<16 random bytes, hex>",
+  "outer_hash": "<SHA-256(intent_id), hex>",
+  "file_key": "<base64: 16-byte age file key>"
 }
 ```
 
@@ -245,7 +249,7 @@ For long-running relay scenarios (approval flows, remote YubiKey touch), the ser
 
 SSE is enabled per-remote via the `stream` field in `relay-config.yaml`. When enabled, the plugin sends `"stream": true` in the request payload. The client detects the response type from `Content-Type`:
 
-- `application/json` → standard JSON (legacy, always works)
+- `application/json` → standard JSON
 - `text/event-stream` → SSE stream
 
 Servers that don't support SSE simply ignore the `stream` field and return JSON.
@@ -254,7 +258,7 @@ Servers that don't support SSE simply ignore the `stream` field and return JSON.
 
 | Event | Data | Meaning |
 |---|---|---|
-| `result` | `{"file_key": "..."}` | Unwrap succeeded — stream ends |
+| `result` | `{"encrypted_payload": "..."}` | Unwrap succeeded — stream ends |
 | `error` | `{"error": "..."}` | Unwrap failed — stream ends |
 | `: comment` | (none) | Heartbeat — keeps connection alive |
 
@@ -264,7 +268,7 @@ Example SSE response:
 : heartbeat
 
 event: result
-data: {"file_key": "dGVzdGtleS4uLi4uLi4u"}
+data: {"encrypted_payload": "<NaCl box blob>"}
 
 ```
 
@@ -272,31 +276,29 @@ Unknown event types are silently ignored for forward compatibility.
 
 ## Config File
 
-For managing multiple remotes with per-remote TLS and timeout, create a `relay-config.yaml`:
+Config mode is required for encrypted payload support. Create a `relay-config.yaml`:
 
 ```yaml
 # relay-config.yaml
 remotes:
   myserver:
     url: https://relay.example:8443/unwrap         # required
+    unwrap_recipient: age1abc...                    # required: age recipient of the unwrapper
     tls_cert: /path/to/client.crt                  # optional (mTLS)
     tls_key: /path/to/client.key                   # optional (mTLS)
     tls_ca: /path/to/ca.crt                        # optional (custom CA)
     timeout: 5m                                    # optional (default: 5m)
     stream: true                                   # optional (SSE for long-running requests)
     auth_token: my-bearer-token                    # optional (Bearer token for simple auth)
-    hmac_key: my-shared-secret                     # optional (HMAC-SHA256 request signing)
-    encrypted_response: true                       # optional (ephemeral X25519 response encryption)
 
   backup:
     url: https://backup.example:9999/unwrap
+    unwrap_recipient: age1def...
 ```
 
 The plugin looks for the config file at:
 1. `AGE_PLUGIN_RELAY_CONFIG` env var (if set)
 2. `$PWD/relay-config.yaml`
-
-Config is optional — URL-based identities work without any config file.
 
 ### Resolution priority at decrypt time
 
@@ -317,7 +319,6 @@ Per-remote config takes priority over environment variables:
 | `AGE_PLUGIN_RELAY_TLS_KEY` | — | Client TLS private key (fallback if not set per-remote) |
 | `AGE_PLUGIN_RELAY_TLS_CA` | — | CA certificate for server verification (fallback if not set per-remote) |
 | `AGE_PLUGIN_RELAY_AUTH_TOKEN` | — | Bearer token for relay server auth (fallback if not set per-remote) |
-| `AGE_PLUGIN_RELAY_HMAC_KEY` | — | HMAC-SHA256 shared key for request signing (fallback if not set per-remote) |
 
 ## Architecture
 
@@ -330,38 +331,39 @@ age-plugin-relay/
 │   ├── identity.go                     # RelayIdentity, NewRelayIdentity, Unwrap, ResolveRemote
 │   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser, async polling
 │   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote, PollInterval
-│   ├── hmac.go                         # HMAC-SHA256 request signing and verification
-│   ├── envelope.go                     # Ephemeral X25519 response encryption (NaCl box)
+│   ├── payload.go                      # Encrypted payload: EncryptPayload, DecryptPayload, OuterHash, inner types
+│   ├── envelope.go                     # NaCl box response encryption: SealResponse, OpenResponse
 │   ├── broker/                         # Broker queue package (package broker)
-│   │   ├── types.go                    # Intent, Status, PluginHeaders, PullResponse, PollResponse
+│   │   ├── types.go                    # Intent, Status, PullResponse, PollResponse
 │   │   ├── queue.go                    # In-memory intent queue with TTL sweep
-│   │   └── queue_test.go              # Broker queue unit tests (18 tests)
-│   ├── relay_test.go                   # Unit tests (mock relay, SSE, HMAC, envelope)
-│   ├── hmac_test.go                    # HMAC signing unit tests
+│   │   └── queue_test.go              # Broker queue unit tests
+│   ├── payload_test.go                 # Encrypted payload unit tests (16 tests)
+│   ├── relay_test.go                   # Unit tests (mock relay, SSE, encrypted payload E2E)
 │   ├── envelope_test.go                # Envelope seal/open unit tests
-│   ├── async_test.go                   # Async (Control Tower) tests (12 tests)
+│   ├── async_test.go                   # Async (Control Tower) tests
 │   ├── integration_test.go             # Integration tests (mock relay, config, errors)
 │   └── e2e_test.go                     # E2E tests (real binaries, full user flow)
 ├── cmd/
 │   ├── age-plugin-relay/
 │   │   └── main.go                     # Plugin binary: flags, --generate, HandleRecipient/Identity
 │   ├── relay-server/
-│   │   └── main.go                     # Minimal relay HTTP server (sync flow)
+│   │   └── main.go                     # Sync relay server: decrypt, verify, unwrap, seal
 │   ├── relay-broker/
-│   │   └── main.go                     # Zero-trust broker HTTP server (async flow)
+│   │   └── main.go                     # Zero-trust broker: stores/forwards opaque encrypted payloads
 │   └── relay-operator/
-│       └── main.go                     # Operator CLI: pull, verify HMAC, unwrap, seal, fulfill/reject
+│       └── main.go                     # Operator CLI: pull, decrypt, verify, unwrap, seal, fulfill/reject
 ├── docs/
-│   └── control-tower-spec.md           # Authoritative async flow spec
+│   ├── control-tower-spec.md           # Async flow spec
+│   └── encrypted-payload-spec.md       # Encrypted payload spec (authoritative)
 ├── test.sh                             # Step-by-step CLI integration test
 └── README.md
 ```
 
 ### Dependencies
 
-- [`filippo.io/age`](https://pkg.go.dev/filippo.io/age) v1.3.1 — age types (`Recipient`, `Identity`, `Stanza`), recipient parsing
+- [`filippo.io/age`](https://pkg.go.dev/filippo.io/age) v1.3.1 — age types (`Recipient`, `Identity`, `Stanza`), recipient parsing, encryption/decryption
 - [`filippo.io/age/plugin`](https://pkg.go.dev/filippo.io/age/plugin) — Plugin framework, Bech32 encoding helpers
-- [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — X25519 and NaCl box for ephemeral response encryption
+- [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — X25519 and NaCl box for response envelope encryption
 - [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) — Config file parsing
 
 ## Testing
@@ -379,25 +381,43 @@ go test -v ./relay/
 | `TestEncodeDecodeRecipient` | `age1relay1...` round-trips through Bech32 encode/decode |
 | `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and target preserved |
 | `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, inner type `X25519` |
-| `TestEndToEndWithMockRelay` | Full flow: generate key pair, wrap via relay, mock HTTP server unwraps, file key matches |
+| `TestEndToEndWithMockRelay` | Full flow: wrap, encrypted payload to mock server, server decrypts/verifies/unwraps/seals, file key matches |
 | `TestUnwrapNoMatchingStanza` | Non-matching stanzas return `age.ErrIncorrectIdentity` |
-| `TestEndToEndWithSSERelay` | Full wrap/unwrap flow over SSE (heartbeat + result event) |
+| `TestEndToEndWithSSERelay` | Full wrap/unwrap flow over SSE with encrypted payload |
 | `TestSSERelayError` | Error event from SSE relay (wrong identity) |
-| `TestEndToEndWithHMACRelay` | Full wrap/unwrap with HMAC-signed requests |
-| `TestHMACRelayRejectsNoSignature` | Server rejects missing HMAC headers |
-| `TestHMACRelayRejectsWrongKey` | Server rejects wrong HMAC key |
-| `TestSignAndVerify` | HMAC sign + verify round-trip |
-| `TestVerifyWrongKey` | HMAC rejects wrong key |
-| `TestVerifyTamperedBody` | HMAC rejects tampered payload |
-| `TestValidateTimestamp` | Timestamp within/outside 5m window |
-| `TestNoncesAreUnique` | 100 nonces are all distinct |
-| `TestEndToEndWithEnvelopeEncryption` | Full wrap/unwrap with HMAC + encrypted response |
-| `TestEnvelopeRejectsSwappedEphemeralKey` | MITM swapping ephemeral key is rejected by HMAC |
-| `TestSealOpenFileKey` | Envelope seal/open round-trip |
-| `TestOpenWrongKey` | Envelope rejects wrong private key |
-| `TestOpenTruncated` | Envelope rejects truncated sealed data |
-| `TestSealDifferentEachTime` | Two seals of same file key produce different ciphertext |
-| `TestEphemeralClear` | Private key is zeroed after Clear() |
+| `TestUnwrapMissingUnwrapRecipient` | Clear error when `unwrap_recipient` is not set |
+| `TestExtractFileKeyEmpty` | Empty response returns error |
+
+### Payload encryption tests
+
+| Test | What it validates |
+|---|---|
+| `TestOuterHashRequestDeterministic` | Same inputs produce same hash |
+| `TestOuterHashResponseDeterministic` | Same intent_id produces same hash |
+| `TestOuterHashKnownAnswer` | Known-answer test for hash computation |
+| `TestEncryptDecryptPayloadRoundTrip` | Encrypt → decrypt round-trip preserves inner payload |
+| `TestDecryptPayloadWrongIdentity` | Decryption with wrong identity fails |
+| `TestVerifyRequestPayloadValid` | Valid outer hash passes verification |
+| `TestVerifyRequestPayloadTamperedHash` | Tampered outer fields detected |
+| `TestVerifyRequestPayloadExpired` | Expired `expires_at` rejected |
+| `TestBuildRequestPayload` | Request payload has correct fields |
+| `TestBuildResponsePayload` | Response payload has correct fields |
+| `TestVerifyResponsePayloadValid` | Valid response hash passes |
+| `TestVerifyResponsePayloadTamperedHash` | Tampered response hash detected |
+| `TestEncryptPayloadNonceUniqueness` | Two encryptions of same payload produce different ciphertext |
+| `TestFullPayloadFlow` | End-to-end: build → encrypt → decrypt → verify → unwrap |
+| `TestBuildRequestPayloadExpiresAtPreserved` | `expires_at` carried through correctly |
+| `TestDecryptPayloadEmpty` | Empty payload returns error |
+
+### Envelope tests
+
+| Test | What it validates |
+|---|---|
+| `TestSealOpenResponse` | NaCl box seal/open round-trip with structured inner response |
+| `TestOpenResponseWrongKey` | Envelope rejects wrong private key |
+| `TestOpenResponseTruncated` | Envelope rejects truncated sealed data |
+| `TestSealResponseDifferentEachTime` | Two seals produce different ciphertext |
+| `TestEphemeralClear` | Private key is zeroed after `Clear()` |
 
 ### Broker queue tests
 
@@ -410,7 +430,7 @@ go test -v ./relay/broker/
 | `TestSubmitAndPoll` | Submit intent, poll returns pending status |
 | `TestSubmitDuplicateReturnsError` | Duplicate intent_id returns `duplicate_intent` error |
 | `TestPollUnknownReturnsNil` | Polling nonexistent intent returns nil |
-| `TestFulfillAndPoll` | Fulfill transitions intent to `fulfilled` with sealed key |
+| `TestFulfillAndPoll` | Fulfill transitions intent to `fulfilled` with encrypted payload |
 | `TestRejectAndPoll` | Reject transitions intent to `rejected` |
 | `TestFulfillUnknownReturnsError` | Fulfilling unknown intent returns `unknown_intent` |
 | `TestRejectUnknownReturnsError` | Rejecting unknown intent returns `unknown_intent` |
@@ -418,7 +438,6 @@ go test -v ./relay/broker/
 | `TestRejectAlreadyRejectedReturnsError` | Double-reject returns `intent_already_terminal` |
 | `TestFulfillAfterRejectReturnsError` | Fulfill after reject returns error |
 | `TestPullReturnsOnlyPendingForTag` | Pull filters by tag and returns only pending intents |
-| `TestPullForwardsPluginHeaders` | Plugin HMAC headers forwarded verbatim through broker |
 | `TestTTLExpiresIntents` | Intents expire after TTL, poll returns nil |
 | `TestTTLExpiresPullResults` | Expired intents excluded from pull results |
 | `TestFulfillAfterTTLReturnsUnknown` | Fulfilling expired intent returns `unknown_intent` |
@@ -434,16 +453,16 @@ go test -v ./relay/ -run TestAsync
 
 | Test | What it validates |
 |---|---|
-| `TestAsyncEndToEnd` | Full flow: submit → pull → HMAC verify → unwrap → seal → fulfill → poll → decrypt |
+| `TestAsyncEndToEnd` | Full flow: submit encrypted → pull → decrypt → verify → unwrap → seal → fulfill → poll → decrypt response |
 | `TestAsyncRejectionFlow` | Operator rejection propagates to plugin poll |
 | `TestAsyncDuplicateIntentReturns409` | Broker returns 409 on duplicate intent_id |
 | `TestAsyncPollUnknownReturns404` | Polling nonexistent intent returns 404 |
 | `TestAsyncFulfillAfterRejectReturns409` | Fulfill on already-terminal intent returns 409 |
 | `TestAsyncPollAfterExpiry` | TTL expiry causes 404 on poll |
-| `TestAsyncPluginPollingLoop` | Full `PostToRelay` async branch with background fulfill goroutine |
+| `TestAsyncPluginPollingLoop` | Full `PostToRelay` async branch with background operator fulfill |
 | `TestAsyncPluginPollingLoopRejected` | `PostToRelay` returns error on operator rejection |
-| `TestAsyncBrokerDoesNotSeeFileKey` | Broker only stores sealed ciphertext, never plaintext file key |
-| `TestAsyncHMACTamperDetection` | HMAC detects wrong key, tampered body, substituted ephemeral key |
+| `TestAsyncBrokerDoesNotSeeFileKey` | Broker only stores opaque encrypted payloads, never plaintext stanzas or file keys |
+| `TestAsyncOuterHashTamperDetection` | Outer hash detects tampered intent_id, tag, and expires_at |
 | `TestPollIntervalDefault` | Default poll interval calculation: `min(timeout/60, 5s)` with 500ms floor |
 | `TestGenerateIntentIDUniqueness` | 100 generated intent IDs are all unique |
 
@@ -451,19 +470,20 @@ go test -v ./relay/ -run TestAsync
 
 | Test | What it validates |
 |---|---|
-| `TestIntegrationLegacyURL` | Full `age.Encrypt` → `age.Decrypt` with URL in identity |
 | `TestIntegrationConfigMode` | Full encrypt/decrypt with remote name resolved from config |
 | `TestIntegrationConfigMissingRemote` | Clear error for non-existent remote (lists available) |
-| `TestIntegrationNoConfigFile` | URL-based identities work without any config file |
+| `TestIntegrationNoConfigFile` | URL-based identities work without config file |
 | `TestIntegrationRelayServerDown` | Clean error when relay endpoint unreachable |
 | `TestIntegrationWrongIdentity` | Clean error when relay has wrong key |
+| `TestIntegrationEncryptedPayloadE2E` | Full encrypted payload end-to-end with mock server |
+| `TestIntegrationMissingUnwrapRecipient` | Clear error when `unwrap_recipient` is not configured |
 
 ### E2E tests
 
 | Test | What it validates |
 |---|---|
-| `TestE2ELegacyURL` | Full user flow with real `age` + `age-keygen` + plugin + relay-server binaries (URL mode) |
-| `TestE2EConfigMode` | Same with config file: shorter identity, `--remote` flag, env var for config path |
+| `TestE2EConfigMode` | Full user flow with real `age` + `age-keygen` + plugin + relay-server binaries (config mode) |
+| `TestE2ESSEStream` | Same with SSE streaming enabled |
 
 ### Integration test (CLI)
 
@@ -485,125 +505,58 @@ The integration test uses the `age` CLI binary, the plugin binary, and a minimal
 ./test.sh clean
 ```
 
-The `relay-server` (`cmd/relay-server/main.go`) is a minimal HTTP server that:
-1. Loads an age identity file (X25519 private key)
-2. Serves `POST /unwrap` — deserializes stanzas, calls `identity.Unwrap()`, returns the file key
-3. Implements the same JSON contract the plugin expects
+## Authentication
 
-In production, the relay endpoint could be anything — an approval gateway, a WebSocket relay agent, a serverless function, etc.
+### Bearer Token
 
-## Authentication & Request Signing
-
-Two optional, independent mechanisms protect the relay endpoint:
-
-### Bearer Token (simple)
-
-A shared token sent as `Authorization: Bearer <token>`. Quick to set up, no replay protection.
+A shared token sent as `Authorization: Bearer <token>`. Quick to set up.
 
 ```yaml
 # relay-config.yaml
 remotes:
   myserver:
     url: https://relay.example:8443/unwrap
+    unwrap_recipient: age1abc...
     auth_token: my-secret-token
 ```
 
 Server: `relay-server -identity keys.txt -auth-token my-secret-token`
 
-### HMAC-SHA256 Signing (recommended)
+## Encrypted Payload (End-to-End Confidentiality)
 
-Each request is signed with HMAC-SHA256 over `timestamp.nonce.[ephemeral_key.]body`. Provides authentication **and** replay protection.
+All requests and responses use mandatory encrypted payloads. There are no configuration flags — encrypted is the only mode.
 
-```yaml
-# relay-config.yaml
-remotes:
-  myserver:
-    url: https://relay.example:8443/unwrap
-    hmac_key: my-shared-secret
-```
+### Request path (plugin → operator)
 
-Server: `relay-server -identity keys.txt -hmac-key my-shared-secret`
+1. Plugin generates an ephemeral X25519 keypair
+2. Plugin builds an inner payload: `{nonce, outer_hash, expires_at, stanzas, ephemeral_key}`
+3. Plugin `age.Encrypt`s the inner payload to the operator's `unwrap_recipient`
+4. Plugin sends the outer envelope with `encrypted_payload` (opaque to broker)
 
-The client attaches three headers to every request:
+### Response path (operator → plugin)
 
-| Header | Value |
-|---|---|
-| `X-Relay-Timestamp` | Unix timestamp (seconds) |
-| `X-Relay-Nonce` | 16-byte random hex |
-| `X-Relay-Signature` | `HMAC-SHA256(key, "{timestamp}.{nonce}.[{ephemeral_key}.]body")` hex |
+1. Operator decrypts the inner payload with their age identity
+2. Operator verifies `outer_hash` (tamper detection) and `expires_at`
+3. Operator unwraps stanzas → file key
+4. Operator builds inner response: `{nonce, outer_hash, file_key}`
+5. Operator NaCl box seals the response to the plugin's ephemeral key
 
-When [encrypted response](#encrypted-response-ephemeral-x25519) is active, the client's ephemeral public key is included in the signed string (`timestamp.nonce.ephemeral_key.body`) to prevent key substitution attacks.
+### Wire format
 
-The server verifies the signature, rejects timestamps outside a 5-minute window, and rejects duplicate nonces.
-
-Both mechanisms can be used together (Bearer is checked first, then HMAC).
-
-### Encrypted Response (Ephemeral X25519)
-
-When `encrypted_response: true` is set, the file key in the server's response is encrypted using an ephemeral X25519 key exchange. This provides **end-to-end payload encryption** independent of TLS — the file key is never plaintext on the wire, even if TLS is stripped, terminated by a proxy, or compromised.
-
-**Requires `hmac_key`** — without HMAC signing, the ephemeral public key header cannot be authenticated, making it vulnerable to key substitution attacks.
-
-```yaml
-remotes:
-  myserver:
-    url: https://relay.example:8443/unwrap
-    hmac_key: my-shared-secret
-    encrypted_response: true
-```
-
-#### How it works
+The `encrypted_payload` in the response contains base64-encoded:
 
 ```
-Client                              Network                Server
-──────                              ───────                ──────
-1. Generate ephemeral X25519 keypair
-2. Sign(hmac_key, ts.nonce.eph_pub.body)
-   ├─ X-Relay-Ephemeral-Key: <pub>  ────────►
-   ├─ X-Relay-Signature: <hmac>     ────────►
-   └─ body (already age-encrypted)  ────────►
-                                                    3. Verify HMAC (incl. eph key)
-                                                    4. Unwrap stanzas → file key
-                                                    5. Generate server ephemeral keypair
-                                                    6. NaCl box.Seal(file_key, client_pub)
-                                        ◄────────  {"encrypted_file_key": "..."}
-7. NaCl box.Open(sealed, server_pub, client_priv)
-8. Discard ephemeral keypair
+serverPub (32 bytes) || nonce (24 bytes) || NaCl box ciphertext
 ```
 
-#### Wire format
+### Security properties
 
-The `encrypted_file_key` field contains base64-encoded:
+- **Broker blindness** — broker sees only `version`, `action`, `intent_id`, `tag`, and opaque ciphertext. Stanzas, ephemeral keys, and file keys are never visible.
+- **Tamper detection** — `outer_hash` inside the encrypted payload binds it to the cleartext routing fields. Broker cannot modify any outer field without detection.
+- **Forward secrecy** — both plugin and operator generate fresh ephemeral keypairs per intent, discarded after use.
+- **Transport-independent** — encrypted end-to-end even over plaintext HTTP.
 
-```
-serverPub (32 bytes) || nonce (24 bytes) || NaCl box ciphertext (16 + 16 bytes)
-```
-
-Total: 88 bytes raw, ~118 bytes base64.
-
-| Component | Size | Description |
-|---|---|---|
-| Server public key | 32 bytes | One-time X25519 public key generated per response |
-| Nonce | 24 bytes | Random XSalsa20-Poly1305 nonce |
-| Ciphertext | 32 bytes | 16-byte file key + 16-byte Poly1305 tag |
-
-#### Security properties
-
-- **Transport-independent** — file key is encrypted end-to-end even over plaintext HTTP
-- **Forward secrecy** — both client and server ephemeral keys are unique per request and discarded after use
-- **Key substitution protection** — ephemeral public key is included in the HMAC signature; swapping it invalidates the signature
-- **No pre-shared encryption key** — uses X25519 key agreement (NaCl box = X25519 + XSalsa20-Poly1305)
-- **Works with SSE** — streaming responses also use `encrypted_file_key` when the ephemeral key header is present
-
-#### Cryptographic construction
-
-Uses Go's `golang.org/x/crypto/nacl/box` (NaCl `crypto_box`):
-
-1. **Client** calls `box.GenerateKey()` → ephemeral X25519 keypair
-2. **Server** calls `box.GenerateKey()` → one-time server keypair, then `box.Seal(fileKey, nonce, clientPub, serverPriv)`
-3. **Client** calls `box.Open(ciphertext, nonce, serverPub, clientPriv)`
-
-The server's one-time keypair ensures the sealed box is unique even for identical file keys (defense against deterministic ciphertext analysis).
+See [`docs/encrypted-payload-spec.md`](docs/encrypted-payload-spec.md) for the full specification.
 
 ## Control Tower (Async Flow)
 
@@ -615,37 +568,41 @@ See [`docs/control-tower-spec.md`](docs/control-tower-spec.md) for the full spec
 
 | Actor | Role | Holds |
 |---|---|---|
-| **Plugin** | Submits unwrap intents, polls for results | `hmac_key` (shared with operator), broker `auth_token` |
+| **Plugin** | Submits encrypted unwrap intents, polls for results | `unwrap_recipient` (for age encryption), broker `auth_token` |
 | **Broker** | Stateful queue and forwarder; **zero-trust** | broker `auth_token` only |
-| **Operator** | Polls for pending intents, unwraps locally, fulfills or rejects | age private key, `hmac_key` (shared with plugin), broker `auth_token` |
+| **Operator** | Polls for pending intents, decrypts, unwraps locally, seals response, fulfills or rejects | age private key, broker `auth_token` |
 
-The broker holds no `hmac_key`, no age identity, and no view into the cryptographic content.
+The broker holds no age identity, no key material, and no view into the cryptographic content.
 
 ### Flow
 
 ```
 Plugin                       Broker                      Operator
 ──────                       ──────                      ────────
-1. unwrap (HMAC-signed)  ──►  Queue intent (202)
+1. Build encrypted payload
+   age.Encrypt(inner,
+   unwrap_recipient)     ──►  Queue intent (202)
                                                     ◄──  2. pull by tag
                               Return pending intents ──►
-                                                         3. Verify plugin HMAC E2E
-                                                         4. Unwrap stanzas locally
-                                                         5. Seal file key → NaCl box
-                                                    ◄──  6. fulfill (sealed key)
-7. poll intent_id        ──►
-   ◄── fulfilled + encrypted_file_key
-8. Open NaCl box with ephemeral private key → file key
+                                                         3. age.Decrypt(encrypted_payload)
+                                                         4. Verify outer_hash + expires_at
+                                                         5. Unwrap stanzas locally
+                                                         6. Build + seal response → NaCl box
+                                                    ◄──  7. fulfill (encrypted_payload)
+8. poll intent_id        ──►
+   ◄── fulfilled + encrypted_payload
+9. Open NaCl box with ephemeral private key
+10. Verify response outer_hash → file key
 ```
 
 ### Actions
 
 | Action | Sender | Description |
 |---|---|---|
-| `unwrap` | Plugin | Submit stanzas + intent_id; returns `200` (sync) or `202` (async) |
+| `unwrap` | Plugin | Submit encrypted payload + intent_id; returns `200` (sync) or `202` (async) |
 | `poll` | Plugin | Check intent status: `pending`, `fulfilled`, `rejected`, or `404` |
 | `pull` | Operator | Get all pending intents for a tag |
-| `fulfill` | Operator | Submit sealed file key for an intent |
+| `fulfill` | Operator | Submit sealed response for an intent |
 | `reject` | Operator | Decline an intent |
 
 ### Async config
@@ -654,10 +611,9 @@ Plugin                       Broker                      Operator
 # relay-config.yaml (plugin)
 remotes:
   approved-server:
-    url: https://broker.example:8443/unwrap
+    url: https://broker.example:8443
+    unwrap_recipient: age1abc...
     auth_token: broker-bearer-token
-    hmac_key: shared-with-operator-only
-    encrypted_response: true
     timeout: 10m
     poll_interval: 2s          # optional; default min(timeout/60, 5s)
 ```
@@ -678,14 +634,13 @@ relay-broker -addr :8443 -auth-token my-token -max-ttl 10m
 
 ### Relay Operator
 
-The operator polls the broker, verifies plugin HMAC end-to-end, unwraps stanzas, and fulfills:
+The operator polls the broker, decrypts encrypted payloads, unwraps stanzas, and fulfills:
 
 ```bash
 relay-operator \
   --broker https://broker.example:8443 \
   --identity keys.txt \
   --tag QPg24g \
-  --hmac-key shared-with-plugin \
   --auth-token broker-bearer-token \
   --pull-interval 5s
 ```
@@ -695,13 +650,12 @@ relay-operator \
 | `--broker` | — | Broker URL (required) |
 | `--identity` | — | Age identity file (required) |
 | `--tag` | — | Routing tag to pull (required) |
-| `--hmac-key` | — | Shared HMAC key with plugin (required) |
 | `--auth-token` | `RELAY_BROKER_AUTH_TOKEN` | Broker Bearer token |
 | `--pull-interval` | — | Polling interval (default `5s`) |
 
 ## Relay Server
 
-The included `relay-server` supports TLS, mTLS, Bearer auth, and HMAC verification:
+The included `relay-server` supports TLS, mTLS, and Bearer auth:
 
 ```bash
 # Minimal (plaintext HTTP — testing only)
@@ -715,10 +669,10 @@ relay-server -identity keys.txt \
 relay-server -identity keys.txt \
   -tls-cert server.crt -tls-key server.key -tls-ca ca.crt
 
-# With HMAC signing
+# With auth token
 relay-server -identity keys.txt \
   -tls-cert server.crt -tls-key server.key \
-  -hmac-key my-shared-secret
+  -auth-token my-secret-token
 ```
 
 Flags and environment variables:
@@ -731,15 +685,14 @@ Flags and environment variables:
 | `-tls-key <file>` | — | TLS server private key |
 | `-tls-ca <file>` | — | CA cert for client verification (enables mTLS) |
 | `-auth-token <token>` | `RELAY_AUTH_TOKEN` | Required Bearer token |
-| `-hmac-key <key>` | `RELAY_HMAC_KEY` | HMAC-SHA256 shared key |
 
 ## Security Properties
 
 - **Encryption is offline** — uses only the inner recipient's public key. No network, no relay, no hardware.
-- **No secrets in the plugin** — the recipient contains only a public key string; the identity contains only a tag and URL.
-- **File key (16 bytes) travels over HTTPS** — use TLS/mTLS for transport security.
-- **HMAC request signing** — prevents replay attacks and authenticates requests (optional, recommended).
-- **Encrypted responses** — ephemeral X25519 encrypts the file key end-to-end, independent of TLS (optional, requires HMAC).
+- **No secrets in the plugin** — the recipient contains only a public key string; the identity contains only a tag and remote name.
+- **End-to-end encrypted payloads** — stanzas and file keys are never visible to the broker or any intermediary.
+- **Tamper detection** — SHA-256 outer hash binds encrypted payloads to cleartext routing fields.
+- **Forward secrecy** — ephemeral keypairs per intent, discarded after use.
 - **With SOPS key groups + Shamir** — intercepting one group's unwrapped share is information-theoretically useless without the other share(s).
 - **Relay endpoint is the trust boundary** — it holds the actual private key or identity. The plugin itself holds no key material.
 
@@ -748,12 +701,11 @@ Flags and environment variables:
 | Scenario | Impact |
 |---|---|
 | Plugin binary compromised | Attacker could redirect relay URL, but still needs the remote identity to unwrap |
-| Relay URL intercepted (no TLS) | Attacker sees encrypted stanzas (useless without identity) and file key (one Shamir share if using key groups). With `encrypted_response`, file key is also encrypted. |
-| TLS-terminating proxy in path | File key visible between proxy and backend. With `encrypted_response`, file key remains encrypted end-to-end. |
+| Relay URL intercepted (no TLS) | Attacker sees only opaque encrypted payloads (useless without identity). |
+| TLS-terminating proxy in path | Payloads remain encrypted end-to-end — proxy sees only ciphertext. |
 | mTLS cert stolen | Attacker can talk to relay, but relay still requires the actual identity to unwrap |
-| HMAC key compromised | Attacker can forge requests and replay. Does NOT compromise `encrypted_response` — ephemeral X25519 key agreement is independent of the HMAC key. |
 | Relay endpoint compromised | Attacker gets file keys — mitigated by using SOPS key groups (need both shares) |
 | Both relay + server compromised | Need physical access to all identity holders (geographic separation with YubiKeys) |
-| Broker compromised (async) | Broker holds no `hmac_key` or age identity. Cannot forge plugin requests or decrypt stanzas. Can DoS (drop intents), detected by plugin timeout. |
-| Ephemeral key substitution (async) | Prevented: ephemeral public key is bound in the HMAC signature. Operator re-verifies HMAC end-to-end on pull. |
-| Fabricated intent (async) | Broker or auth_token holder can submit payloads, but without `hmac_key` the operator rejects on HMAC verification. |
+| Broker compromised (async) | Broker holds no age identity. Cannot decrypt payloads or forge responses. Can DoS (drop intents), detected by plugin timeout. |
+| Outer field tampering (broker) | Detected by outer_hash mismatch inside the encrypted payload. Operator/plugin rejects. |
+| Fabricated intent (async) | Without the operator's age recipient, cannot create a valid encrypted_payload. Operator's age.Decrypt fails. |

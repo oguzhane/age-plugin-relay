@@ -1,9 +1,9 @@
 // relay-operator is a CLI tool that polls a relay-broker for pending unwrap
-// intents, verifies the plugin's HMAC end-to-end, unwraps stanzas locally
-// using an age identity, and fulfills (or rejects) the intent.
+// intents, decrypts the encrypted payload using an age identity, unwraps
+// stanzas locally, and fulfills (or rejects) the intent.
 //
-// The operator holds the age private key and shares an hmac_key with the plugin
-// (not with the broker). The broker is treated as zero-trust.
+// The operator holds the age private key. The broker is treated as zero-trust —
+// all payloads are encrypted end-to-end between the plugin and the operator.
 //
 // Usage:
 //
@@ -11,7 +11,6 @@
 //	  --broker https://broker.example:8443 \
 //	  --identity keys.txt \
 //	  --tag QPg24g \
-//	  --hmac-key shared-with-plugin \
 //	  [--auth-token broker-bearer-token] \
 //	  [--pull-interval 5s]
 package main
@@ -38,7 +37,6 @@ func main() {
 		brokerURL    string
 		identityFile string
 		tag          string
-		hmacKey      string
 		authToken    string
 		pullInterval = 5 * time.Second
 	)
@@ -60,11 +58,6 @@ func main() {
 			if i < len(os.Args) {
 				tag = os.Args[i]
 			}
-		case "--hmac-key":
-			i++
-			if i < len(os.Args) {
-				hmacKey = os.Args[i]
-			}
 		case "--auth-token":
 			i++
 			if i < len(os.Args) {
@@ -80,8 +73,8 @@ func main() {
 		}
 	}
 
-	if brokerURL == "" || identityFile == "" || tag == "" || hmacKey == "" {
-		fmt.Fprintf(os.Stderr, "Usage: relay-operator --broker URL --identity FILE --tag TAG --hmac-key KEY [options]\n\n")
+	if brokerURL == "" || identityFile == "" || tag == "" {
+		fmt.Fprintf(os.Stderr, "Usage: relay-operator --broker URL --identity FILE --tag TAG [options]\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		fmt.Fprintf(os.Stderr, "  --auth-token TOKEN   Bearer token for broker access\n")
 		fmt.Fprintf(os.Stderr, "  --pull-interval DUR  Polling interval (default: 5s)\n")
@@ -100,22 +93,6 @@ func main() {
 	fmt.Fprintf(os.Stderr, "[relay-operator] Loaded %d identity(ies) from %s\n", len(identities), identityFile)
 	fmt.Fprintf(os.Stderr, "[relay-operator] Polling %s for tag=%s every %s\n", brokerURL, tag, pullInterval)
 
-	// Nonce dedup for replay protection.
-	seenNonces := make(map[string]time.Time)
-
-	// Nonce cleanup ticker.
-	go func() {
-		for {
-			time.Sleep(relay.HMACMaxDrift)
-			now := time.Now()
-			for k, t := range seenNonces {
-				if now.Sub(t) > relay.HMACMaxDrift {
-					delete(seenNonces, k)
-				}
-			}
-		}
-	}()
-
 	for {
 		pullResp, err := pullIntents(brokerURL, tag, authToken)
 		if err != nil {
@@ -127,40 +104,30 @@ func main() {
 		for _, intent := range pullResp.Intents {
 			fmt.Fprintf(os.Stderr, "[relay-operator] Processing intent %s\n", intent.IntentID)
 
-			// 1. Verify plugin HMAC end-to-end.
-			requestBody, err := json.Marshal(intent.Request)
+			// 1. Decrypt the encrypted payload.
+			if intent.Request.EncryptedPayload == "" {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   No encrypted_payload — skipping\n")
+				continue
+			}
+
+			inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, identities)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Failed to marshal request: %v\n", err)
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Decrypt failed: %v — skipping\n", err)
 				continue
 			}
 
-			if err := relay.ValidateTimestamp(intent.PluginHeaders.Timestamp); err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   HMAC timestamp invalid: %v — skipping\n", err)
+			// 2. Verify outer hash and expiry.
+			if err := relay.VerifyRequestPayload(inner, intent.Request.Version, intent.Request.Action, intent.Request.IntentID, intent.Request.Tag, intent.Request.ExpiresAt); err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
+				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
+					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
+				}
 				continue
 			}
 
-			if err := relay.VerifySignature(
-				[]byte(hmacKey),
-				intent.PluginHeaders.Timestamp,
-				intent.PluginHeaders.Nonce,
-				requestBody,
-				intent.PluginHeaders.Signature,
-				intent.PluginHeaders.EphemeralKey,
-			); err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   HMAC verification failed: %v — skipping\n", err)
-				continue
-			}
-
-			// Nonce dedup.
-			if _, seen := seenNonces[intent.PluginHeaders.Nonce]; seen {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Duplicate nonce — skipping\n")
-				continue
-			}
-			seenNonces[intent.PluginHeaders.Nonce] = time.Now()
-
-			// 2. Convert stanzas and attempt unwrap.
-			stanzas := make([]*age.Stanza, len(intent.Request.Stanzas))
-			for i, s := range intent.Request.Stanzas {
+			// 3. Convert stanzas and attempt unwrap.
+			stanzas := make([]*age.Stanza, len(inner.Stanzas))
+			for i, s := range inner.Stanzas {
 				bodyBytes, err := base64.RawStdEncoding.DecodeString(s.Body)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid stanza body: %v\n", err)
@@ -188,8 +155,8 @@ func main() {
 				continue
 			}
 
-			// 3. Seal file key to plugin's ephemeral public key.
-			ephKeyBytes, err := base64.RawStdEncoding.DecodeString(intent.PluginHeaders.EphemeralKey)
+			// 4. Decode ephemeral key from inner payload.
+			ephKeyBytes, err := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
 			if err != nil || len(ephKeyBytes) != 32 {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid ephemeral key — rejecting\n")
 				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
@@ -202,8 +169,18 @@ func main() {
 			var clientPub [32]byte
 			copy(clientPub[:], ephKeyBytes)
 
-			sealed, err := relay.SealFileKey(fileKey, clientPub)
+			// 5. Build response payload and seal.
+			respInner, err := relay.BuildResponsePayload(intent.IntentID, fileKey)
 			clear(fileKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Build response error: %v — rejecting\n", err)
+				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
+					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
+				}
+				continue
+			}
+
+			sealed, err := relay.SealResponse(*respInner, clientPub)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Seal error: %v — rejecting\n", err)
 				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
@@ -212,7 +189,7 @@ func main() {
 				continue
 			}
 
-			// 4. Fulfill the intent.
+			// 6. Fulfill the intent.
 			if err := fulfillIntent(brokerURL, intent.IntentID, sealed, authToken); err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Fulfill error: %v\n", err)
 				continue
@@ -233,12 +210,12 @@ func pullIntents(brokerURL, tag, authToken string) (*broker.PullResponse, error)
 	return doRequest[broker.PullResponse](brokerURL, req, authToken)
 }
 
-func fulfillIntent(brokerURL, intentID, encryptedFileKey, authToken string) error {
+func fulfillIntent(brokerURL, intentID, encryptedPayload, authToken string) error {
 	req := relay.RelayRequest{
 		Version:          1,
 		Action:           "fulfill",
 		IntentID:         intentID,
-		EncryptedFileKey: encryptedFileKey,
+		EncryptedPayload: encryptedPayload,
 	}
 	_, err := doRequest[map[string]string](brokerURL, req, authToken)
 	return err

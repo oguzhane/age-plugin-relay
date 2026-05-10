@@ -8,7 +8,7 @@ Authoritative design for the async (brokered) decryption flow in `age-plugin-rel
 
 - Support approval-driven remote unwrap, where the holder of the operator identity is not online to answer synchronously.
 - Add async without a parallel protocol: same endpoint, same request format, same crypto primitives.
-- Treat the broker as **zero-trust** infrastructure. The broker stores and forwards opaque, authenticated payloads. It holds no key material, makes no policy decisions, and emits no metadata.
+- Treat the broker as **zero-trust** infrastructure. The broker stores and forwards opaque, encrypted payloads. It holds no key material, makes no policy decisions, and emits no metadata.
 
 ---
 
@@ -18,8 +18,8 @@ Authoritative design for the async (brokered) decryption flow in `age-plugin-rel
 |---|---|
 | Plugin holds zero key material | Existing plugin design |
 | Tag = `SHA-256(inner_recipient_string)[:16]` for routing | Existing identity format |
-| HMAC-SHA256 over `timestamp.nonce.[ephemeral_key.]body` for authenticity + replay protection | Existing `hmac.go` |
-| NaCl box ephemeral X25519 envelope for response E2E encryption | Existing `envelope.go` |
+| Encrypted payloads (age-encrypted requests, NaCl box responses) for E2E confidentiality | `payload.go`, `envelope.go` |
+| Outer hash binding encrypted payload to cleartext routing fields | `payload.go` |
 | `action`-driven, version-tagged JSON HTTP contract | Existing wire format |
 | File-key confidentiality via age-wrapped stanzas | Existing recipient model |
 | Trust boundary = the holder of the operator identity | Existing model |
@@ -32,11 +32,11 @@ The async flow adds nothing to these — it reuses every primitive verbatim.
 
 | Actor | Role | Holds |
 |---|---|---|
-| **Plugin** | Submits unwrap intents, polls for results | `hmac_key` (shared with operator), broker `auth_token` |
+| **Plugin** | Submits encrypted unwrap intents, polls for results | `unwrap_recipient` (for age encryption), broker `auth_token` |
 | **Broker** | Stateful queue and forwarder; zero-trust | broker `auth_token` only |
-| **Operator** | Polls for pending intents, unwraps locally, fulfills or rejects | age private key, `hmac_key` (shared with plugin), broker `auth_token` |
+| **Operator** | Polls for pending intents, decrypts, unwraps locally, seals response, fulfills or rejects | age private key, broker `auth_token` |
 
-The broker has no `hmac_key`, no age identity, no view into the cryptographic content of any intent.
+The broker has no age identity, no view into the cryptographic content of any intent.
 
 ---
 
@@ -46,7 +46,7 @@ A relay endpoint may choose to answer an `unwrap` request synchronously (when th
 
 | Status | Body | Plugin behavior |
 |---|---|---|
-| `200 OK` | `{"file_key": ...}` or `{"encrypted_file_key": ...}` | Sync result — done |
+| `200 OK` | `{"encrypted_payload": ...}` | Sync result — done |
 | `202 Accepted` | `{}` | Async — switch to polling using the plugin's own `intent_id` |
 | `409 Conflict` | `{"error":"duplicate_intent"}` | Retry with a freshly generated `intent_id` |
 | `4xx/5xx` | as today | Errors |
@@ -57,7 +57,7 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
 
 ## 5. Wire protocol
 
-All messages are JSON over `POST` to a single endpoint URL. All authenticated messages carry the existing HMAC headers (`X-Relay-Timestamp`, `X-Relay-Nonce`, optionally `X-Relay-Ephemeral-Key`, `X-Relay-Signature`). Bearer auth uses `Authorization: Bearer <auth_token>`.
+All messages are JSON over `POST` to a single endpoint URL. Bearer auth uses `Authorization: Bearer <auth_token>`. All request payloads containing stanzas are encrypted end-to-end via `encrypted_payload`.
 
 ### 5.1. Plugin → Broker
 
@@ -68,14 +68,15 @@ All messages are JSON over `POST` to a single endpoint URL. All authenticated me
   "version": 1,
   "action": "unwrap",
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-  "stanzas": [
-    { "type": "X25519", "args": ["..."], "body": "..." }
-  ]
+  "tag": "QPg24g",
+  "expires_at": 1715350800,
+  "encrypted_payload": "<base64: age-encrypted blob>"
 }
 ```
 
-- `intent_id` is **plugin-generated**: 16 random bytes, hex-encoded (32 chars). Covered by the HMAC.
-- HMAC headers as today.
+- `intent_id` is **plugin-generated**: 16 random bytes, hex-encoded (32 chars).
+- `encrypted_payload` contains the age-encrypted inner payload (stanzas, ephemeral key, outer hash, nonce). Opaque to the broker.
+- `expires_at` is the plugin-defined intent expiry (Unix timestamp, seconds).
 
 Responses: see §4.
 
@@ -89,12 +90,10 @@ Responses: see §4.
 }
 ```
 
-- HMAC over `timestamp.nonce.body`. No `ephemeral_key` here — that was bound at submit time.
-
 | Status | Body | Meaning |
 |---|---|---|
 | `200 OK` | `{"status":"pending"}` | Keep polling |
-| `200 OK` | `{"status":"fulfilled", "encrypted_file_key": "..."}` | Plugin opens with its ephemeral private key |
+| `200 OK` | `{"status":"fulfilled", "encrypted_payload": "..."}` | Plugin opens NaCl box with its ephemeral private key, verifies outer_hash |
 | `200 OK` | `{"status":"rejected"}` | Operator declined; plugin returns failure |
 | `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
 
@@ -112,9 +111,7 @@ The broker does not distinguish "expired" from "never existed." Both collapse to
 }
 ```
 
-- HMAC signed with the operator's `hmac_key`. (HMAC here authenticates the operator's request to the broker; not strictly required for E2E security, but consistent with the rest of the protocol.)
-
-Response — the full plugin-signed payload, verbatim, for each pending intent matching the tag:
+Response — the full request, verbatim, for each pending intent matching the tag:
 
 ```json
 {
@@ -125,22 +122,22 @@ Response — the full plugin-signed payload, verbatim, for each pending intent m
         "version": 1,
         "action": "unwrap",
         "intent_id": "a3f1...",
-        "stanzas": [...]
-      },
-      "plugin_headers": {
-        "X-Relay-Timestamp": "...",
-        "X-Relay-Nonce": "...",
-        "X-Relay-Ephemeral-Key": "...",
-        "X-Relay-Signature": "..."
+        "tag": "QPg24g",
+        "expires_at": 1715350800,
+        "encrypted_payload": "<age-encrypted blob>"
       }
     }
   ]
 }
 ```
 
-The operator MUST verify the plugin's HMAC over `request` + `plugin_headers` before acting on any intent. The broker is not trusted to have verified anything.
+The operator MUST:
+1. `age.Decrypt(encrypted_payload, identity)` to obtain the inner payload.
+2. Verify `outer_hash` matches the recomputed `SHA-256("version.action.intent_id.tag.expires_at")`.
+3. Check `expires_at` — reject if in the past.
+4. Extract stanzas and ephemeral key, proceed with unwrap.
 
-The response contains **no broker-asserted metadata** — no `created_at`, no `expires_at`, no broker timestamps. Any timing the operator needs is derived from the plugin's signed `X-Relay-Timestamp`.
+The response contains **no broker-asserted metadata** — no `created_at`, no broker timestamps.
 
 #### `fulfill`
 
@@ -149,12 +146,11 @@ The response contains **no broker-asserted metadata** — no `created_at`, no `e
   "version": 1,
   "action": "fulfill",
   "intent_id": "a3f1...",
-  "encrypted_file_key": "<base64: serverPub(32) || nonce(24) || NaCl box ciphertext>"
+  "encrypted_payload": "<base64: NaCl box sealed inner response>"
 }
 ```
 
-- HMAC signed with operator's `hmac_key`.
-- `encrypted_file_key` format: identical to the existing sync `encrypted_response` envelope (`serverPub || nonce || ciphertext`), sealed via NaCl `box.Seal` to the plugin's `X-Relay-Ephemeral-Key` from the original request.
+- `encrypted_payload` format: NaCl `box.Seal` of `{nonce, outer_hash, file_key}` to the plugin's ephemeral key from the original request.
 
 Response: `200 OK` on success, `404` if `intent_id` is unknown, `409` if already terminal.
 
@@ -167,8 +163,6 @@ Response: `200 OK` on success, `404` if `intent_id` is unknown, `409` if already
   "intent_id": "a3f1..."
 }
 ```
-
-- HMAC signed with operator's `hmac_key`.
 
 Response: `200 OK` on success, `404`/`409` as for `fulfill`.
 
@@ -220,32 +214,33 @@ If the plugin's `unwrap` POST fails before receiving a response, the plugin SHOU
 Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path returns `409` and obscures whether the original submission succeeded.
 
 ### 8.3. Replay protection
-- Operator-side: existing nonce dedup + 5-minute timestamp window over the plugin's HMAC.
-- Broker-side: none required. Replay of a captured `unwrap` to the broker either collides (`409`) or, if the original was already cleaned up, creates a duplicate intent that the operator will reject on nonce dedup.
+- Encrypted payload: age encryption uses unique ephemeral keys per encryption. Replaying a captured `unwrap` to the broker either collides (`409`) or, if the original was already cleaned up, creates a duplicate intent that the operator verifies via `expires_at` and outer hash.
+- Response payload: NaCl box uses unique nonces. Replaying a captured `fulfill` to a different intent fails because `outer_hash` inside the sealed response is bound to the original `intent_id`.
 
 ---
 
 ## 9. Security model
 
 ### 9.1. Threat: broker compromise
-- Broker holds no `hmac_key` and no age identity. It cannot forge plugin requests or operator responses.
-- Broker can read `tag` (already public; identical to sync flow's wire format) and stanzas (already age-encrypted to the operator's identity; broker cannot decrypt).
-- Broker can substitute neither `intent_id` nor `ephemeral_pub` — both are covered by the plugin's HMAC.
+- Broker holds no age identity. It cannot decrypt `encrypted_payload` and cannot forge valid encrypted payloads.
+- Broker can read `tag` (already public; routing metadata) and `intent_id` (random, no semantic content).
+- Broker cannot read stanzas, ephemeral keys, or file keys — all inside `encrypted_payload`.
+- Broker cannot substitute or tamper with any outer field — `outer_hash` inside the encrypted payload detects this.
 - Broker can DoS (drop intents, return `404`, return `409` falsely). Detected by the plugin's local timeout.
 
 ### 9.2. Threat: ephemeral key substitution
-- The plugin's `X-Relay-Ephemeral-Key` is bound by the HMAC over `timestamp.nonce.ephemeral_key.body`.
-- The broker forwards plugin headers verbatim; the operator re-verifies the HMAC.
-- A substituted ephemeral key invalidates the HMAC. The operator MUST refuse to fulfill on HMAC failure.
+- The plugin's ephemeral public key is inside the age-encrypted inner payload. The broker cannot read or modify it.
+- A substituted ephemeral key would require forging a valid age-encrypted payload, which requires the operator's private key.
 
 ### 9.3. Threat: fabricated intent
-- The broker (or any holder of the broker `auth_token`) can submit `unwrap` payloads.
-- Without `hmac_key`, those payloads have no valid plugin HMAC. The operator rejects them on pull-side verification.
+- Without the operator's age recipient public key, an attacker cannot create a valid `encrypted_payload` that the operator can decrypt.
+- Even with the public key, the attacker cannot create a payload containing valid age-wrapped stanzas (those require the correct file key).
 
 ### 9.4. Threat: operator response forgery
-- The operator seals `encrypted_file_key` via NaCl box to the plugin's ephemeral pubkey from the original request.
+- The operator seals `encrypted_payload` via NaCl box to the plugin's ephemeral pubkey from the original request.
 - Only a holder of the matching ephemeral private key (the plugin) can open the box.
 - A forged or tampered response fails `box.Open`. The plugin MUST treat open failure as terminal.
+- The response includes `outer_hash = SHA-256(intent_id)` — the plugin verifies this to ensure the response matches the original intent.
 
 ### 9.5. Known limitations
 - **Metadata leakage to the broker.** The broker observes `tag` values and per-tag traffic timing. Mitigation: a future "blind tag index" extension can replace `tag` with `HMAC(operator_secret, tag)`. Out of scope for this spec.
@@ -261,37 +256,33 @@ Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path 
 ```yaml
 remotes:
   approved-server:
-    url: https://broker.example:8443/unwrap
+    url: https://broker.example:8443
+    unwrap_recipient: age1abc...             # required: age recipient of the unwrapper
     auth_token: broker-bearer-token          # required: broker access
-    hmac_key: shared-with-operator-only      # required: E2E with operator
-    encrypted_response: true                 # required: ephemeral envelope
     timeout: 10m                             # plugin's local deadline
     poll_interval: 2s                        # optional; default min(timeout/60, 5s)
 ```
 
 No `flow:` field. The plugin discovers async via the `202` response.
 
-### 10.2. Operator (new binary)
+### 10.2. Operator (CLI binary)
 
-```yaml
-broker:
-  url: https://broker.example:8443/unwrap
-  auth_token: broker-bearer-token            # same shared token as plugin (per §9.5)
-hmac_key: shared-with-operator-only          # same as plugin's
-identity: /path/to/age/identity.txt
-tag: QPg24g
-pull_interval: 30s
+```bash
+relay-operator \
+  --broker https://broker.example:8443 \
+  --identity /path/to/age/identity.txt \
+  --tag QPg24g \
+  --auth-token broker-bearer-token \
+  --pull-interval 30s
 ```
 
 ### 10.3. Broker
 
-```yaml
-addr: :8443
-auth_token: broker-bearer-token              # single shared token
-max_ttl: 10m                                 # internal cleanup deadline
+```bash
+relay-broker -addr :8443 -auth-token broker-bearer-token -max-ttl 10m
 ```
 
-The broker has no `hmac_key`, no identity file, no notion of `flow`.
+The broker has no age identity, no notion of `flow`.
 
 ---
 
@@ -299,34 +290,39 @@ The broker has no `hmac_key`, no identity file, no notion of `flow`.
 
 ### New files
 - `cmd/relay-broker/main.go` — broker binary (single endpoint, action-based routing, Bearer auth only)
-- `cmd/relay-operator/main.go` — operator CLI (pull, HMAC verify, unwrap, seal, fulfill/reject, nonce dedup)
+- `cmd/relay-operator/main.go` — operator CLI (pull, decrypt, verify, unwrap, seal, fulfill/reject)
 - `relay/broker/queue.go` — in-memory intent queue with TTL sweep
-- `relay/broker/types.go` — `Intent`, `Status`, `PluginHeaders`, `PullIntent`, `PullResponse`, `PollResponse`, `AsyncAccepted`
-- `relay/broker/queue_test.go` — 18 broker queue unit tests
-- `relay/async_test.go` — 12 async flow tests (E2E, rejection, 409/404, polling loop, security, HMAC tamper detection)
+- `relay/broker/types.go` — `Intent`, `Status`, `PullIntent`, `PullResponse`, `PollResponse`, `AsyncAccepted`
+- `relay/broker/queue_test.go` — broker queue unit tests
+- `relay/payload.go` — encrypted payload types and functions
+- `relay/async_test.go` — async flow tests
 
 ### Modified files
-- `relay/client.go` — added `intent_id`/`tag`/`encrypted_file_key` to `RelayRequest`; `PostToRelay` handles `202` → `pollForResult` loop, `409` conflict; exported `GenerateIntentID`; added `asyncPollResponse` struct
-- `relay/config.go` — added `PollInterval` field to `RemoteConfig` and `PollIntervalDuration()` method (default `min(timeout/60, 5s)`, floor 500ms)
+- `relay/client.go` — `PostToRelay` handles `202` → `pollForResult` loop, `409` conflict; always builds encrypted payload; exported `GenerateIntentID`
+- `relay/config.go` — `UnwrapRecipient` field, `PollInterval` field and `PollIntervalDuration()` method
+- `relay/envelope.go` — `SealResponse`/`OpenResponse` with structured inner JSON
+- `relay/identity.go` — passes `UnwrapRecipient` to `PostToRelay`
 
 ### Unchanged files
-- `relay/hmac.go`, `relay/envelope.go`, `relay/identity.go`, `relay/recipient.go`, `relay/encoding.go`
+- `relay/encoding.go`, `relay/errors.go`, `relay/recipient.go`
 
 ---
 
 ## 12. Build order
 
-1. `relay/broker/types.go` — internal types
-2. `relay/broker/queue.go` — in-memory queue + TTL sweep
-3. `relay/broker/queue_test.go` — 18 queue unit tests
-4. `cmd/relay-broker/main.go` — HTTP handlers for `unwrap` (queue-only branch), `poll`, `pull`, `fulfill`, `reject`
-5. `cmd/relay-operator/main.go` — operator CLI with pull loop, E2E HMAC verification, unwrap, seal, fulfill/reject
-6. `relay/client.go` — async branch: `intent_id` generation, `202`/`409`/`404` handling, polling loop
-7. `relay/config.go` — `poll_interval` field and `PollIntervalDuration()` method
-8. `relay/async_test.go` — 12 async flow tests (E2E, security, tamper detection)
+1. `relay/payload.go` — inner payload types, encrypt/decrypt, outer hash
+2. `relay/envelope.go` — `SealResponse`/`OpenResponse` with structured inner
+3. `relay/broker/types.go` — internal types
+4. `relay/broker/queue.go` — in-memory queue + TTL sweep
+5. `relay/broker/queue_test.go` — queue unit tests
+6. `cmd/relay-broker/main.go` — HTTP handlers for `unwrap`, `poll`, `pull`, `fulfill`, `reject`
+7. `cmd/relay-operator/main.go` — operator CLI with pull loop, decrypt, verify, unwrap, seal, fulfill/reject
+8. `relay/client.go` — encrypted payload construction, `202`/`409`/`404` handling, polling loop
+9. `relay/config.go` — `unwrap_recipient` and `poll_interval` fields
+10. `relay/async_test.go` — async flow tests
 
 ---
 
 ## 13. Summary
 
-The async flow is the sync flow plus a queue and a CLI. The plugin generates its own `intent_id`, chooses its own poll cadence, and discovers async through a `202` response. The broker stores opaque HMAC-signed payloads keyed by plugin-supplied IDs, indexed by tag, and emits no policy or metadata. The operator pulls, verifies the plugin's HMAC end-to-end, unwraps locally, and fulfills with a NaCl-sealed file key. Every cryptographic primitive is inherited from the existing sync implementation.
+The async flow is the sync flow plus a queue and a CLI. The plugin generates its own `intent_id`, chooses its own poll cadence, and discovers async through a `202` response. The broker stores opaque encrypted payloads keyed by plugin-supplied IDs, indexed by tag, and emits no policy or metadata. The operator pulls, decrypts the age-encrypted payload, verifies the outer hash, unwraps locally, and fulfills with a NaCl-sealed response. Every cryptographic primitive is inherited from the existing sync implementation. The broker is blind — it never sees stanzas, ephemeral keys, or file keys.

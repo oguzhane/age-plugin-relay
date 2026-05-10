@@ -18,7 +18,7 @@ import (
 )
 
 // mockBroker simulates a relay-broker for testing. It routes actions to an
-// in-memory queue and captures plugin HMAC headers for operator verification.
+// in-memory queue and stores opaque encrypted payloads.
 type mockBroker struct {
 	queue     *broker.Queue
 	authToken string
@@ -43,13 +43,7 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "unwrap":
-		headers := broker.PluginHeaders{
-			Timestamp:    r.Header.Get(relay.HMACHeaderTimestamp),
-			Nonce:        r.Header.Get(relay.HMACHeaderNonce),
-			Signature:    r.Header.Get(relay.HMACHeaderSignature),
-			EphemeralKey: r.Header.Get(relay.EnvelopeHeader),
-		}
-		if err := b.queue.Submit(req.IntentID, req.Tag, body, headers); err != nil {
+		if err := b.queue.Submit(req.IntentID, req.Tag, body); err != nil {
 			if err.Error() == "duplicate_intent" {
 				writeAsyncTestJSON(w, http.StatusConflict, map[string]string{"error": "duplicate_intent"})
 				return
@@ -74,7 +68,7 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsyncTestJSON(w, http.StatusOK, resp)
 
 	case "fulfill":
-		if err := b.queue.Fulfill(req.IntentID, req.EncryptedFileKey); err != nil {
+		if err := b.queue.Fulfill(req.IntentID, req.EncryptedPayload); err != nil {
 			if err.Error() == "unknown_intent" {
 				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
 			} else {
@@ -107,8 +101,8 @@ func writeAsyncTestJSON(w http.ResponseWriter, code int, v any) {
 }
 
 // TestAsyncEndToEnd tests the full async flow:
-// plugin submits unwrap → broker queues → operator pulls, verifies HMAC,
-// unwraps, seals file key → broker stores → plugin polls → plugin decrypts.
+// plugin submits encrypted unwrap → broker queues → operator pulls, decrypts,
+// verifies, unwraps, seals response → broker stores → plugin polls → plugin decrypts.
 func TestAsyncEndToEnd(t *testing.T) {
 	operatorIdentity, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -121,7 +115,6 @@ func TestAsyncEndToEnd(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	hmacKey := "test-e2e-hmac-key"
 	tagBytes := relay.ComputeTag(recipientStr)
 	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
 
@@ -132,14 +125,10 @@ func TestAsyncEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	relayReq := relay.RelayRequest{
-		Version: 1,
-		Action:  "unwrap",
-		Tag:     tag,
-		Stanzas: make([]relay.RelayStanza, len(stanzas)),
-	}
+	// Build relay stanzas for the inner payload.
+	relayStanzas := make([]relay.RelayStanza, len(stanzas))
 	for i, s := range stanzas {
-		relayReq.Stanzas[i] = relay.RelayStanza{
+		relayStanzas[i] = relay.RelayStanza{
 			Type: s.Type,
 			Args: s.Args,
 			Body: base64.RawStdEncoding.EncodeToString(s.Body),
@@ -150,8 +139,6 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	relayReq.IntentID = intentID
-	reqBody, _ := json.Marshal(relayReq)
 
 	ephemeral, err := relay.GenerateEphemeral()
 	if err != nil {
@@ -160,18 +147,31 @@ func TestAsyncEndToEnd(t *testing.T) {
 	defer ephemeral.Clear()
 	ephemeralB64 := base64.RawStdEncoding.EncodeToString(ephemeral.PublicKey[:])
 
-	ts, nonce, sig, err := relay.SignRequest([]byte(hmacKey), reqBody, ephemeralB64)
+	expiresAt := time.Now().Add(5 * time.Minute).Unix()
+
+	// Build and encrypt inner payload.
+	innerReq, err := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedPayload, err := relay.EncryptPayload(*innerReq, recipientStr)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// Submit to broker.
+	relayReq := relay.RelayRequest{
+		Version:          1,
+		Action:           "unwrap",
+		IntentID:         intentID,
+		Tag:              tag,
+		ExpiresAt:        expiresAt,
+		EncryptedPayload: encryptedPayload,
+	}
+	reqBody, _ := json.Marshal(relayReq)
+
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(reqBody))
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(relay.HMACHeaderTimestamp, ts)
-	httpReq.Header.Set(relay.HMACHeaderNonce, nonce)
-	httpReq.Header.Set(relay.HMACHeaderSignature, sig)
-	httpReq.Header.Set(relay.EnvelopeHeader, ephemeralB64)
-
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", resp.StatusCode)
 	}
-	t.Logf("Plugin submitted intent %s → 202 Accepted", intentID)
+	t.Logf("Plugin submitted intent %s -> 202 Accepted", intentID)
 
 	// Operator pulls.
 	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tag}
@@ -199,17 +199,22 @@ func TestAsyncEndToEnd(t *testing.T) {
 	intent := pullResult.Intents[0]
 	t.Logf("Operator pulled intent %s", intent.IntentID)
 
-	// Operator verifies HMAC.
-	intentReqBody, _ := json.Marshal(intent.Request)
-	err = relay.VerifySignature([]byte(hmacKey), intent.PluginHeaders.Timestamp, intent.PluginHeaders.Nonce, intentReqBody, intent.PluginHeaders.Signature, intent.PluginHeaders.EphemeralKey)
+	// Operator decrypts the encrypted payload.
+	inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, []age.Identity{operatorIdentity})
 	if err != nil {
-		t.Fatalf("Operator HMAC verification failed: %v", err)
+		t.Fatalf("Operator decrypt failed: %v", err)
 	}
-	t.Log("Operator verified plugin HMAC ✓")
+	t.Log("Operator decrypted inner payload")
 
-	// Operator unwraps.
-	ageStanzas := make([]*age.Stanza, len(intent.Request.Stanzas))
-	for i, s := range intent.Request.Stanzas {
+	// Operator verifies outer hash.
+	if err := relay.VerifyRequestPayload(inner, intent.Request.Version, intent.Request.Action, intent.Request.IntentID, intent.Request.Tag, intent.Request.ExpiresAt); err != nil {
+		t.Fatalf("Operator verification failed: %v", err)
+	}
+	t.Log("Operator verified outer hash")
+
+	// Operator unwraps stanzas.
+	ageStanzas := make([]*age.Stanza, len(inner.Stanzas))
+	for i, s := range inner.Stanzas {
 		body, _ := base64.RawStdEncoding.DecodeString(s.Body)
 		ageStanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: body}
 	}
@@ -217,20 +222,21 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Operator unwrap failed: %v", err)
 	}
-	t.Log("Operator unwrapped file key ✓")
+	t.Log("Operator unwrapped file key")
 
-	// Operator seals to plugin ephemeral.
-	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(intent.PluginHeaders.EphemeralKey)
+	// Operator seals response to plugin's ephemeral key.
+	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
 	var clientPub [32]byte
 	copy(clientPub[:], ephKeyBytes)
-	sealed, err := relay.SealFileKey(recoveredFileKey, clientPub)
+	respInner, _ := relay.BuildResponsePayload(intentID, recoveredFileKey)
+	sealed, err := relay.SealResponse(*respInner, clientPub)
 	if err != nil {
 		t.Fatalf("Operator seal failed: %v", err)
 	}
-	t.Log("Operator sealed file key ✓")
+	t.Log("Operator sealed response")
 
 	// Operator fulfills.
-	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedFileKey: sealed}
+	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
 	fulfillBody, _ := json.Marshal(fulfillReq)
 	fulfillHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fulfillBody))
 	fulfillHTTP.Header.Set("Content-Type", "application/json")
@@ -239,7 +245,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if fulfillResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 on fulfill, got %d", fulfillResp.StatusCode)
 	}
-	t.Log("Operator fulfilled ✓")
+	t.Log("Operator fulfilled")
 
 	// Plugin polls.
 	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
@@ -255,18 +261,24 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if pollResult.Status != "fulfilled" {
 		t.Fatalf("expected fulfilled, got %s", pollResult.Status)
 	}
-	t.Log("Plugin polled → fulfilled ✓")
+	t.Log("Plugin polled -> fulfilled")
 
-	// Plugin decrypts.
-	decryptedFileKey, err := relay.OpenFileKey(pollResult.EncryptedFileKey, ephemeral.PrivateKey)
+	// Plugin decrypts the response.
+	respPayload, err := relay.OpenResponse(pollResult.EncryptedPayload, ephemeral.PrivateKey)
 	if err != nil {
 		t.Fatalf("Plugin decrypt failed: %v", err)
+	}
+	if err := relay.VerifyResponsePayload(respPayload, intentID); err != nil {
+		t.Fatalf("Plugin response verification failed: %v", err)
+	}
+	decryptedFileKey, err := base64.RawStdEncoding.DecodeString(respPayload.FileKey)
+	if err != nil {
+		t.Fatalf("decoding file key: %v", err)
 	}
 	if !bytes.Equal(decryptedFileKey, fileKey) {
 		t.Fatalf("file key mismatch:\n  got:  %x\n  want: %x", decryptedFileKey, fileKey)
 	}
-	t.Log("Plugin decrypted file key ✓ — matches original")
-	_ = recipientStr
+	t.Log("Plugin decrypted file key — matches original")
 }
 
 // TestAsyncRejectionFlow tests that operator rejection propagates to plugin.
@@ -278,13 +290,13 @@ func TestAsyncRejectionFlow(t *testing.T) {
 
 	intentID := "reject-test-001"
 
-	// Submit an intent.
+	// Submit an intent with encrypted payload.
 	req := relay.RelayRequest{
-		Version:  1,
-		Action:   "unwrap",
-		IntentID: intentID,
-		Tag:      "test-tag",
-		Stanzas:  []relay.RelayStanza{{Type: "X25519", Args: []string{"arg"}, Body: "Ym9keQ"}},
+		Version:          1,
+		Action:           "unwrap",
+		IntentID:         intentID,
+		Tag:              "test-tag",
+		EncryptedPayload: "opaque-encrypted-data",
 	}
 	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
@@ -331,11 +343,11 @@ func TestAsyncDuplicateIntentReturns409(t *testing.T) {
 	defer brokerServer.Close()
 
 	req := relay.RelayRequest{
-		Version:  1,
-		Action:   "unwrap",
-		IntentID: "dup-409",
-		Tag:      "tag",
-		Stanzas:  []relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Yg"}},
+		Version:          1,
+		Action:           "unwrap",
+		IntentID:         "dup-409",
+		Tag:              "tag",
+		EncryptedPayload: "opaque",
 	}
 	body, _ := json.Marshal(req)
 
@@ -386,7 +398,7 @@ func TestAsyncFulfillAfterRejectReturns409(t *testing.T) {
 	defer brokerServer.Close()
 
 	// Submit.
-	submit := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "terminal-test", Tag: "t", Stanzas: []relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Yg"}}}
+	submit := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "terminal-test", Tag: "t", EncryptedPayload: "opaque"}
 	sb, _ := json.Marshal(submit)
 	sr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(sb))
 	sr.Header.Set("Content-Type", "application/json")
@@ -402,7 +414,7 @@ func TestAsyncFulfillAfterRejectReturns409(t *testing.T) {
 	rResp.Body.Close()
 
 	// Try to fulfill — should fail.
-	fulfill := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: "terminal-test", EncryptedFileKey: "data"}
+	fulfill := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: "terminal-test", EncryptedPayload: "data"}
 	fb, _ := json.Marshal(fulfill)
 	fr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
 	fr.Header.Set("Content-Type", "application/json")
@@ -421,7 +433,7 @@ func TestAsyncPollAfterExpiry(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	req := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "expire-test", Tag: "t", Stanzas: []relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Yg"}}}
+	req := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "expire-test", Tag: "t", EncryptedPayload: "opaque"}
 	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -450,7 +462,6 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	recipientStr := operatorIdentity.Recipient().String()
-	hmacKey := "polling-loop-hmac"
 
 	mb := newMockBroker(2 * time.Minute)
 	defer mb.stop()
@@ -458,11 +469,10 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	defer brokerServer.Close()
 
 	remote := relay.RemoteConfig{
-		URL:               brokerServer.URL,
-		HMACKey:           hmacKey,
-		EncryptedResponse: true,
-		Timeout:           "10s",
-		PollInterval:      "50ms",
+		URL:             brokerServer.URL,
+		UnwrapRecipient: recipientStr,
+		Timeout:         "10s",
+		PollInterval:    "50ms",
 	}
 
 	// Wrap a file key using the operator's recipient.
@@ -480,34 +490,16 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pluginFileKey, pluginErr = relay.PostToRelay(remote, innerStanzas)
+		pluginFileKey, pluginErr = relay.PostToRelay(remote, innerStanzas, recipientStr)
 	}()
 
 	// Give the plugin time to submit.
 	time.Sleep(200 * time.Millisecond)
 
-	// Find and process the intent as the operator would.
-	// We need to discover what tag the plugin used.
-	// Pull all pending intents. Since we don't know the exact tag the plugin
-	// used (it includes it in the request body), we'll read from the queue directly.
-	// For this test, we know there's exactly one intent.
-	// Pull with empty tag iterates all — but our broker filters by tag.
-	// Instead, let's poll by examining the queue.
-
-	// Actually, the plugin's PostToRelay doesn't set Tag in the request body currently.
-	// It only sets intent_id. So pull with empty tag. Let's fix this by pulling all.
-	// The mock broker stores raw body — let's just find the intent via poll after
-	// examining the mock broker's queue.
-
-	// Simpler approach: read from mock broker's queue by polling with known patterns.
-	// Since tag is empty in the plugin's request, pull with empty tag returns nothing.
-	// The real flow requires the identity to set the tag. For this test, let's
-	// work around by pulling all intents — the operator knows which tag to look for.
-
-	// Actually: the plugin needs to include the tag in the unwrap request for the broker
-	// to route it. In PostToRelay, we don't currently set Tag. But the broker stores
-	// whatever tag is in the request. Since it's empty, pull with "" should match.
-	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: ""}
+	// Pull all pending intents using the same tag computation as PostToRelay.
+	tagBytes := relay.ComputeTag(recipientStr)
+	tagStr := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tagStr}
 	pullBody, _ := json.Marshal(pullReq)
 	pullHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pullBody))
 	pullHTTP.Header.Set("Content-Type", "application/json")
@@ -525,9 +517,20 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	intent := pullResult.Intents[0]
 	t.Logf("Operator found intent %s", intent.IntentID)
 
+	// Operator decrypts the encrypted payload.
+	inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, []age.Identity{operatorIdentity})
+	if err != nil {
+		t.Fatalf("operator decrypt: %v", err)
+	}
+
+	// Operator verifies.
+	if err := relay.VerifyRequestPayload(inner, intent.Request.Version, intent.Request.Action, intent.Request.IntentID, intent.Request.Tag, intent.Request.ExpiresAt); err != nil {
+		t.Fatalf("operator verify: %v", err)
+	}
+
 	// Operator unwraps.
-	ageStanzas := make([]*age.Stanza, len(intent.Request.Stanzas))
-	for i, s := range intent.Request.Stanzas {
+	ageStanzas := make([]*age.Stanza, len(inner.Stanzas))
+	for i, s := range inner.Stanzas {
 		b, _ := base64.RawStdEncoding.DecodeString(s.Body)
 		ageStanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: b}
 	}
@@ -536,21 +539,18 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 		t.Fatalf("operator unwrap: %v", err)
 	}
 
-	// Operator seals to plugin's ephemeral key.
-	ephKeyB64 := intent.PluginHeaders.EphemeralKey
-	if ephKeyB64 == "" {
-		t.Fatal("no ephemeral key in plugin headers")
-	}
-	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(ephKeyB64)
+	// Operator seals response to plugin's ephemeral key.
+	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
 	var clientPub [32]byte
 	copy(clientPub[:], ephKeyBytes)
-	sealed, err := relay.SealFileKey(opFileKey, clientPub)
+	respInner, _ := relay.BuildResponsePayload(intent.IntentID, opFileKey)
+	sealed, err := relay.SealResponse(*respInner, clientPub)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Operator fulfills.
-	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intent.IntentID, EncryptedFileKey: sealed}
+	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intent.IntentID, EncryptedPayload: sealed}
 	fb, _ := json.Marshal(fulfillReq)
 	fh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
 	fh.Header.Set("Content-Type", "application/json")
@@ -567,8 +567,7 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	if !bytes.Equal(pluginFileKey, fileKey) {
 		t.Fatalf("file key mismatch:\n  got:  %x\n  want: %x", pluginFileKey, fileKey)
 	}
-	t.Logf("Plugin recovered correct file key via async polling ✓")
-	_ = recipientStr
+	t.Logf("Plugin recovered correct file key via async polling")
 }
 
 // TestAsyncPluginPollingLoopRejected tests that PostToRelay returns an error
@@ -578,6 +577,7 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recipientStr := operatorIdentity.Recipient().String()
 
 	mb := newMockBroker(2 * time.Minute)
 	defer mb.stop()
@@ -585,11 +585,10 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 	defer brokerServer.Close()
 
 	remote := relay.RemoteConfig{
-		URL:               brokerServer.URL,
-		HMACKey:           "reject-hmac",
-		EncryptedResponse: true,
-		Timeout:           "5s",
-		PollInterval:      "50ms",
+		URL:             brokerServer.URL,
+		UnwrapRecipient: recipientStr,
+		Timeout:         "5s",
+		PollInterval:    "50ms",
 	}
 
 	fileKey := make([]byte, 16)
@@ -604,13 +603,15 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, pluginErr = relay.PostToRelay(remote, innerStanzas)
+		_, pluginErr = relay.PostToRelay(remote, innerStanzas, recipientStr)
 	}()
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Find the intent.
-	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: ""}
+	// Find the intent by pulling with the computed tag.
+	tagBytes := relay.ComputeTag(recipientStr)
+	tagStr := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tagStr}
 	pb, _ := json.Marshal(pullReq)
 	ph, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pb))
 	ph.Header.Set("Content-Type", "application/json")
@@ -643,13 +644,14 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 	t.Logf("Plugin correctly received rejection error: %v", pluginErr)
 }
 
-// TestAsyncBrokerDoesNotSeeFileKey verifies the broker only stores sealed ciphertext
-// and never has access to the plaintext file key.
+// TestAsyncBrokerDoesNotSeeFileKey verifies the broker only stores opaque
+// encrypted payloads and never has access to plaintext stanzas or file keys.
 func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	operatorIdentity, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
+	recipientStr := operatorIdentity.Recipient().String()
 
 	mb := newMockBroker(2 * time.Minute)
 	defer mb.stop()
@@ -665,113 +667,159 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Submit to broker.
+	// Build encrypted payload as the plugin would.
 	intentID := "blind-test-001"
-	req := relay.RelayRequest{
-		Version:  1,
-		Action:   "unwrap",
-		IntentID: intentID,
-		Tag:      "blind-tag",
-		Stanzas:  make([]relay.RelayStanza, len(innerStanzas)),
-	}
+	tagBytes := relay.ComputeTag(recipientStr)
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:])
+	expiresAt := time.Now().Add(5 * time.Minute).Unix()
+
+	relayStanzas := make([]relay.RelayStanza, len(innerStanzas))
 	for i, s := range innerStanzas {
-		req.Stanzas[i] = relay.RelayStanza{
+		relayStanzas[i] = relay.RelayStanza{
 			Type: s.Type,
 			Args: s.Args,
 			Body: base64.RawStdEncoding.EncodeToString(s.Body),
 		}
 	}
-	body, _ := json.Marshal(req)
 
-	// Generate ephemeral for response encryption.
 	eph, _ := relay.GenerateEphemeral()
 	defer eph.Clear()
 	ephB64 := base64.RawStdEncoding.EncodeToString(eph.PublicKey[:])
 
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephB64)
+	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
+
+	// Submit to broker.
+	req := relay.RelayRequest{
+		Version:          1,
+		Action:           "unwrap",
+		IntentID:         intentID,
+		Tag:              tag,
+		ExpiresAt:        expiresAt,
+		EncryptedPayload: encPayload,
+	}
+	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(relay.EnvelopeHeader, ephB64)
 	resp, _ := http.DefaultClient.Do(httpReq)
 	resp.Body.Close()
 
-	// Operator fulfills with sealed key.
-	opFileKey, _ := operatorIdentity.Unwrap(innerStanzas)
-	var clientPub [32]byte
-	copy(clientPub[:], eph.PublicKey[:])
-	sealed, _ := relay.SealFileKey(opFileKey, clientPub)
-
-	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedFileKey: sealed}
-	fb, _ := json.Marshal(fulfillReq)
-	fh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
-	fh.Header.Set("Content-Type", "application/json")
-	fResp, _ := http.DefaultClient.Do(fh)
-	fResp.Body.Close()
-
-	// Poll to get the stored sealed key.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
-	pb, _ := json.Marshal(pollReq)
+	// Verify broker cannot see plaintext stanzas — the outer request has no Stanzas field,
+	// only encrypted_payload. Pull the intent and verify it's opaque.
+	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tag}
+	pb, _ := json.Marshal(pullReq)
 	ph, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pb))
 	ph.Header.Set("Content-Type", "application/json")
 	pResp, _ := http.DefaultClient.Do(ph)
 	pBody, _ := io.ReadAll(pResp.Body)
 	pResp.Body.Close()
 
-	var pollResult broker.PollResponse
-	json.Unmarshal(pBody, &pollResult)
+	var pullResult broker.PullResponse
+	json.Unmarshal(pBody, &pullResult)
+	if len(pullResult.Intents) != 1 {
+		t.Fatalf("expected 1 intent, got %d", len(pullResult.Intents))
+	}
 
-	// The broker stored encrypted_file_key — verify it's NOT the plaintext file key.
+	// The broker's view of the request should have encrypted_payload but NOT plaintext stanzas.
+	if pullResult.Intents[0].Request.EncryptedPayload == "" {
+		t.Fatal("SECURITY: broker should store encrypted_payload")
+	}
+
+	// Operator fulfills with sealed key.
+	inner, _ := relay.DecryptPayload(pullResult.Intents[0].Request.EncryptedPayload, []age.Identity{operatorIdentity})
+	ageStanzas := make([]*age.Stanza, len(inner.Stanzas))
+	for i, s := range inner.Stanzas {
+		b, _ := base64.RawStdEncoding.DecodeString(s.Body)
+		ageStanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: b}
+	}
+	opFileKey, _ := operatorIdentity.Unwrap(ageStanzas)
+
+	var clientPub [32]byte
+	copy(clientPub[:], eph.PublicKey[:])
+	respInner, _ := relay.BuildResponsePayload(intentID, opFileKey)
+	sealed, _ := relay.SealResponse(*respInner, clientPub)
+
+	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
+	fb, _ := json.Marshal(fulfillReq)
+	fh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
+	fh.Header.Set("Content-Type", "application/json")
+	fResp, _ := http.DefaultClient.Do(fh)
+	fResp.Body.Close()
+
+	// Poll to get the stored sealed payload.
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	pollBody, _ := json.Marshal(pollReq)
+	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
+	pollHTTP.Header.Set("Content-Type", "application/json")
+	pollResp, _ := http.DefaultClient.Do(pollHTTP)
+	pollRespBody, _ := io.ReadAll(pollResp.Body)
+	pollResp.Body.Close()
+
+	var pollResult broker.PollResponse
+	json.Unmarshal(pollRespBody, &pollResult)
+
+	// The broker stored encrypted_payload — verify it's NOT the plaintext file key.
 	fileKeyB64 := base64.RawStdEncoding.EncodeToString(fileKey)
-	if pollResult.EncryptedFileKey == fileKeyB64 {
+	if pollResult.EncryptedPayload == fileKeyB64 {
 		t.Fatal("SECURITY: broker stored plaintext file key!")
 	}
 
 	// But the plugin CAN decrypt it.
-	decrypted, err := relay.OpenFileKey(pollResult.EncryptedFileKey, eph.PrivateKey)
+	decryptedResp, err := relay.OpenResponse(pollResult.EncryptedPayload, eph.PrivateKey)
 	if err != nil {
 		t.Fatalf("plugin decrypt: %v", err)
 	}
-	if !bytes.Equal(decrypted, fileKey) {
+	decryptedFileKey, _ := base64.RawStdEncoding.DecodeString(decryptedResp.FileKey)
+	if !bytes.Equal(decryptedFileKey, fileKey) {
 		t.Fatal("decrypted file key doesn't match original")
 	}
-	t.Log("Broker only stores sealed ciphertext; plugin decrypts correctly ✓")
+	t.Log("Broker only stores opaque encrypted payloads; plugin decrypts correctly")
 }
 
-// TestAsyncHMACTamperDetection verifies that the operator detects tampered payloads.
-func TestAsyncHMACTamperDetection(t *testing.T) {
+// TestAsyncOuterHashTamperDetection verifies that the operator detects tampered
+// outer fields via outer_hash mismatch in the encrypted payload.
+func TestAsyncOuterHashTamperDetection(t *testing.T) {
+	operatorIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipientStr := operatorIdentity.Recipient().String()
+
 	mb := newMockBroker(2 * time.Minute)
 	defer mb.stop()
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	hmacKey := "tamper-detect-key"
+	intentID := "tamper-1"
+	tagBytes := relay.ComputeTag(recipientStr)
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:])
+	expiresAt := time.Now().Add(5 * time.Minute).Unix()
 
-	// Submit a signed intent.
-	req := relay.RelayRequest{
-		Version:  1,
-		Action:   "unwrap",
-		IntentID: "tamper-1",
-		Tag:      "tamper-tag",
-		Stanzas:  []relay.RelayStanza{{Type: "X25519", Args: []string{"arg"}, Body: "Ym9keQ"}},
-	}
-	body, _ := json.Marshal(req)
-
+	// Build inner payload with correct outer hash.
 	eph, _ := relay.GenerateEphemeral()
 	defer eph.Clear()
 	ephB64 := base64.RawStdEncoding.EncodeToString(eph.PublicKey[:])
 
-	ts, nonce, sig, _ := relay.SignRequest([]byte(hmacKey), body, ephB64)
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, nil, ephB64)
+	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
+	// Submit with correct outer fields.
+	req := relay.RelayRequest{
+		Version:          1,
+		Action:           "unwrap",
+		IntentID:         intentID,
+		Tag:              tag,
+		ExpiresAt:        expiresAt,
+		EncryptedPayload: encPayload,
+	}
+	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(relay.HMACHeaderTimestamp, ts)
-	httpReq.Header.Set(relay.HMACHeaderNonce, nonce)
-	httpReq.Header.Set(relay.HMACHeaderSignature, sig)
-	httpReq.Header.Set(relay.EnvelopeHeader, ephB64)
 	resp, _ := http.DefaultClient.Do(httpReq)
 	resp.Body.Close()
 
 	// Pull the intent.
-	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: "tamper-tag"}
+	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tag}
 	pb, _ := json.Marshal(pullReq)
 	ph, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pb))
 	ph.Header.Set("Content-Type", "application/json")
@@ -787,65 +835,39 @@ func TestAsyncHMACTamperDetection(t *testing.T) {
 
 	intent := pr.Intents[0]
 
-	// Operator verifies with correct key — should pass.
-	intentBody, _ := json.Marshal(intent.Request)
-	err := relay.VerifySignature(
-		[]byte(hmacKey),
-		intent.PluginHeaders.Timestamp,
-		intent.PluginHeaders.Nonce,
-		intentBody,
-		intent.PluginHeaders.Signature,
-		intent.PluginHeaders.EphemeralKey,
-	)
+	// Operator decrypts.
+	inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, []age.Identity{operatorIdentity})
 	if err != nil {
-		t.Fatalf("valid HMAC should verify: %v", err)
+		t.Fatalf("decrypt: %v", err)
 	}
-	t.Log("Valid HMAC verified ✓")
 
-	// Operator verifies with WRONG key — should fail.
-	err = relay.VerifySignature(
-		[]byte("wrong-key"),
-		intent.PluginHeaders.Timestamp,
-		intent.PluginHeaders.Nonce,
-		intentBody,
-		intent.PluginHeaders.Signature,
-		intent.PluginHeaders.EphemeralKey,
-	)
-	if err == nil {
-		t.Fatal("SECURITY: HMAC should fail with wrong key")
+	// Verify with correct outer fields — should pass.
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", intentID, tag, expiresAt)
+	if err != nil {
+		t.Fatalf("valid verification should pass: %v", err)
 	}
-	t.Log("Wrong HMAC key correctly rejected ✓")
+	t.Log("Valid outer hash verified")
 
-	// Tamper with body and verify — should fail.
-	tamperedBody := append(intentBody, []byte("tampered")...)
-	err = relay.VerifySignature(
-		[]byte(hmacKey),
-		intent.PluginHeaders.Timestamp,
-		intent.PluginHeaders.Nonce,
-		tamperedBody,
-		intent.PluginHeaders.Signature,
-		intent.PluginHeaders.EphemeralKey,
-	)
+	// Verify with tampered intent_id — should fail.
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", "tampered-intent", tag, expiresAt)
 	if err == nil {
-		t.Fatal("SECURITY: HMAC should fail with tampered body")
+		t.Fatal("SECURITY: tampered intent_id should fail verification")
 	}
-	t.Log("Tampered body correctly rejected ✓")
+	t.Log("Tampered intent_id correctly rejected")
 
-	// Tamper with ephemeral key and verify — should fail (key substitution attack).
-	fakeEph, _ := relay.GenerateEphemeral()
-	fakeEphB64 := base64.RawStdEncoding.EncodeToString(fakeEph.PublicKey[:])
-	err = relay.VerifySignature(
-		[]byte(hmacKey),
-		intent.PluginHeaders.Timestamp,
-		intent.PluginHeaders.Nonce,
-		intentBody,
-		intent.PluginHeaders.Signature,
-		fakeEphB64,
-	)
+	// Verify with tampered tag — should fail.
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", intentID, "tampered-tag", expiresAt)
 	if err == nil {
-		t.Fatal("SECURITY: HMAC should fail with substituted ephemeral key")
+		t.Fatal("SECURITY: tampered tag should fail verification")
 	}
-	t.Log("Ephemeral key substitution correctly rejected ✓")
+	t.Log("Tampered tag correctly rejected")
+
+	// Verify with tampered expires_at — should fail.
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", intentID, tag, expiresAt+1000)
+	if err == nil {
+		t.Fatal("SECURITY: tampered expires_at should fail verification")
+	}
+	t.Log("Tampered expires_at correctly rejected")
 }
 
 // TestPollIntervalDefault tests the default poll interval calculation.
