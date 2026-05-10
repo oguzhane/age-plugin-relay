@@ -643,7 +643,6 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 	}
 	t.Logf("Plugin correctly received rejection error: %v", pluginErr)
 }
-
 // TestAsyncBrokerDoesNotSeeFileKey verifies the broker only stores opaque
 // encrypted payloads and never has access to plaintext stanzas or file keys.
 func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
@@ -868,53 +867,4 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 		t.Fatal("SECURITY: tampered expires_at should fail verification")
 	}
 	t.Log("Tampered expires_at correctly rejected")
-}
-
-// TestPollIntervalDefault tests the default poll interval calculation.
-func TestPollIntervalDefault(t *testing.T) {
-	// Default timeout = 5m → 5m/60 = 5s.
-	r := relay.RemoteConfig{}
-	d := r.PollIntervalDuration()
-	if d != 5*time.Second {
-		t.Fatalf("expected 5s default, got %s", d)
-	}
-
-	// Short timeout = 10s → 10s/60 ≈ 166ms → clamped to 500ms.
-	r2 := relay.RemoteConfig{Timeout: "10s"}
-	d2 := r2.PollIntervalDuration()
-	if d2 != 500*time.Millisecond {
-		t.Fatalf("expected 500ms floor, got %s", d2)
-	}
-
-	// Long timeout = 1h → 1h/60 = 1m → capped at 5s.
-	r3 := relay.RemoteConfig{Timeout: "1h"}
-	d3 := r3.PollIntervalDuration()
-	if d3 != 5*time.Second {
-		t.Fatalf("expected 5s cap, got %s", d3)
-	}
-
-	// Explicit poll_interval overrides.
-	r4 := relay.RemoteConfig{PollInterval: "2s"}
-	d4 := r4.PollIntervalDuration()
-	if d4 != 2*time.Second {
-		t.Fatalf("expected 2s from config, got %s", d4)
-	}
-}
-
-// TestGenerateIntentIDUniqueness tests that intent IDs are unique.
-func TestGenerateIntentIDUniqueness(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 100; i++ {
-		id, err := relay.GenerateIntentID()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(id) != 32 { // 16 bytes = 32 hex chars
-			t.Fatalf("expected 32-char hex ID, got %d chars: %s", len(id), id)
-		}
-		if seen[id] {
-			t.Fatalf("duplicate intent ID: %s", id)
-		}
-		seen[id] = true
-	}
 }

@@ -314,3 +314,80 @@ func TestResponsePayloadFullFlow(t *testing.T) {
 		t.Errorf("file_key mismatch")
 	}
 }
+
+// ── ParseRecipientString ────────────────────────────────────────────────────
+
+func TestParseRecipientStringValid(t *testing.T) {
+	_, recipientStr := testIdentity(t)
+	r, err := relay.ParseRecipientString(recipientStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil {
+		t.Fatal("expected non-nil recipient")
+	}
+}
+
+func TestParseRecipientStringUnsupported(t *testing.T) {
+	_, err := relay.ParseRecipientString("ssh-ed25519 AAAA...")
+	if err == nil {
+		t.Fatal("expected error for unsupported type")
+	}
+}
+
+func TestParseRecipientStringInvalid(t *testing.T) {
+	_, err := relay.ParseRecipientString("age1notavalidrecipient")
+	if err == nil {
+		t.Fatal("expected error for invalid age1 string")
+	}
+}
+
+// ── Outer hash tamper detection (encrypt → decrypt → verify) ────────────────
+
+func TestOuterHashTamperDetectionTag(t *testing.T) {
+	id, recipientStr := testIdentity(t)
+
+	tagBytes := relay.ComputeTag(recipientStr)
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	expiresAt := time.Now().Add(10 * time.Minute).Unix()
+
+	inner, _ := relay.BuildRequestPayload(1, "unwrap", "abc123", tag, expiresAt,
+		[]relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Ym9keQ"}}, "ZXBoZW1lcmFs")
+	encrypted, _ := relay.EncryptPayload(*inner, recipientStr)
+
+	decrypted, _ := relay.DecryptPayload(encrypted, []age.Identity{id})
+	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", "abc123", "TAMPERED", expiresAt)
+	if err == nil {
+		t.Fatal("expected outer_hash mismatch for tampered tag")
+	}
+}
+
+func TestOuterHashTamperDetectionIntentID(t *testing.T) {
+	id, recipientStr := testIdentity(t)
+
+	expiresAt := time.Now().Add(10 * time.Minute).Unix()
+	inner, _ := relay.BuildRequestPayload(1, "unwrap", "abc123", "QPg24g", expiresAt,
+		[]relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Ym9keQ"}}, "ZXBoZW1lcmFs")
+	encrypted, _ := relay.EncryptPayload(*inner, recipientStr)
+
+	decrypted, _ := relay.DecryptPayload(encrypted, []age.Identity{id})
+	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", "TAMPERED", "QPg24g", expiresAt)
+	if err == nil {
+		t.Fatal("expected outer_hash mismatch for tampered intent_id")
+	}
+}
+
+func TestExpiresAtEnforcement(t *testing.T) {
+	id, recipientStr := testIdentity(t)
+
+	expiresAt := time.Now().Add(-1 * time.Minute).Unix() // already expired
+	inner, _ := relay.BuildRequestPayload(1, "unwrap", "abc123", "QPg24g", expiresAt,
+		[]relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Ym9keQ"}}, "ZXBoZW1lcmFs")
+	encrypted, _ := relay.EncryptPayload(*inner, recipientStr)
+
+	decrypted, _ := relay.DecryptPayload(encrypted, []age.Identity{id})
+	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", "abc123", "QPg24g", expiresAt)
+	if err == nil {
+		t.Fatal("expected expiry error")
+	}
+}

@@ -337,12 +337,16 @@ age-plugin-relay/
 │   │   ├── types.go                    # Intent, Status, PullResponse, PollResponse
 │   │   ├── queue.go                    # In-memory intent queue with TTL sweep
 │   │   └── queue_test.go              # Broker queue unit tests
-│   ├── payload_test.go                 # Encrypted payload unit tests (16 tests)
-│   ├── relay_test.go                   # Unit tests (mock relay, SSE, encrypted payload E2E)
-│   ├── envelope_test.go                # Envelope seal/open unit tests
-│   ├── async_test.go                   # Async (Control Tower) tests
-│   ├── integration_test.go             # Integration tests (mock relay, config, errors)
-│   └── e2e_test.go                     # E2E tests (real binaries, full user flow)
+│   ├── helpers_test.go                # Shared test helpers (mock relay server)
+│   ├── encoding_test.go               # Encoding unit tests (ComputeTag, Bech32 encode/decode)
+│   ├── identity_test.go               # Identity/Unwrap tests (sync, SSE, errors, concurrency)
+│   ├── client_test.go                 # Client tests (PostToRelay, extractFileKey, sanitizeErrorMsg, auth, SSE, async)
+│   ├── config_test.go                 # Config tests (LoadConfig, LookupRemote, timeout, poll interval)
+│   ├── payload_test.go                # Encrypted payload tests (outer hash, encrypt/decrypt, verify, tamper detection)
+│   ├── envelope_test.go               # Envelope seal/open unit tests (NaCl box)
+│   ├── async_test.go                  # Async (Control Tower) tests (broker protocol, E2E)
+│   ├── integration_test.go            # Integration tests (age.Encrypt/Decrypt E2E, broker blindness, tampering)
+│   └── e2e_test.go                    # E2E tests (real binaries, full user flow)
 ├── cmd/
 │   ├── age-plugin-relay/
 │   │   └── main.go                     # Plugin binary: flags, --generate, HandleRecipient/Identity

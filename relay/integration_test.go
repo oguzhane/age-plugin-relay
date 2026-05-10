@@ -2,7 +2,13 @@ package relay
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,4 +246,193 @@ func TestIntegrationMissingUnwrapRecipient(t *testing.T) {
 		t.Fatalf("error should mention unwrap_recipient, got: %v", err)
 	}
 	t.Logf("Got expected error: %v", err)
+}
+
+// ── Encrypted payload sync E2E through age.Encrypt / age.Decrypt ────────────
+
+func TestEncryptedPayloadSyncE2E(t *testing.T) {
+	identity, _ := age.GenerateX25519Identity()
+	recipientStr := identity.Recipient().String()
+
+	server := newMockRelayServer(t, identity)
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
+	plaintext := []byte("sync E2E: encrypted payload only mode")
+
+	var ciphertext bytes.Buffer
+	w, _ := age.Encrypt(&ciphertext, relayRecipient)
+	w.Write(plaintext)
+	w.Close()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "relay-config.yaml")
+	configContent := fmt.Sprintf("remotes:\n  test:\n    url: %s\n    unwrap_recipient: %s\n    timeout: 10s\n", server.URL, recipientStr)
+	os.WriteFile(configPath, []byte(configContent), 0644)
+	t.Setenv("AGE_PLUGIN_RELAY_CONFIG", configPath)
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL, UnwrapRecipient: recipientStr},
+	}
+
+	r, err := age.Decrypt(bytes.NewReader(ciphertext.Bytes()), relayIdentity)
+	if err != nil {
+		t.Fatalf("age.Decrypt: %v", err)
+	}
+	decrypted, _ := io.ReadAll(r)
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Fatalf("mismatch: %q vs %q", decrypted, plaintext)
+	}
+}
+
+func TestEncryptedPayloadSyncE2EWithSSE(t *testing.T) {
+	identity, _ := age.GenerateX25519Identity()
+	recipientStr := identity.Recipient().String()
+
+	server := newMockRelayServer(t, identity)
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
+	plaintext := []byte("SSE sync E2E: encrypted payload with streaming")
+
+	var ciphertext bytes.Buffer
+	w, _ := age.Encrypt(&ciphertext, relayRecipient)
+	w.Write(plaintext)
+	w.Close()
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL, Stream: true, UnwrapRecipient: recipientStr},
+	}
+
+	r, err := age.Decrypt(bytes.NewReader(ciphertext.Bytes()), relayIdentity)
+	if err != nil {
+		t.Fatalf("age.Decrypt SSE: %v", err)
+	}
+	decrypted, _ := io.ReadAll(r)
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Fatalf("mismatch: %q vs %q", decrypted, plaintext)
+	}
+}
+
+// ── Broker blindness — opaque encrypted_payload verification ────────────────
+
+func TestBrokerBlindnessVerification(t *testing.T) {
+	identity, _ := age.GenerateX25519Identity()
+	recipientStr := identity.Recipient().String()
+
+	var capturedPayload string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RelayRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		capturedPayload = req.EncryptedPayload
+
+		inner, err := DecryptPayload(req.EncryptedPayload, []age.Identity{identity})
+		if err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
+			return
+		}
+		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
+			return
+		}
+		stanzas := make([]*age.Stanza, len(inner.Stanzas))
+		for i, s := range inner.Stanzas {
+			body, _ := base64.RawStdEncoding.DecodeString(s.Body)
+			stanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: body}
+		}
+		fileKey, _ := identity.Unwrap(stanzas)
+		ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
+		var clientPub [32]byte
+		copy(clientPub[:], ephKeyBytes)
+		respInner, _ := BuildResponsePayload(req.IntentID, fileKey)
+		sealed, _ := SealResponse(*respInner, clientPub)
+		json.NewEncoder(w).Encode(RelayResponse{EncryptedPayload: sealed})
+	}))
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+	stanzas, _ := relayRecipient.Wrap(fileKey)
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL, UnwrapRecipient: recipientStr},
+	}
+	recovered, err := relayIdentity.Unwrap(stanzas)
+	if err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	if !bytes.Equal(recovered, fileKey) {
+		t.Fatal("file key mismatch")
+	}
+
+	// Broker cannot parse encrypted payload as JSON
+	raw, _ := base64.RawStdEncoding.DecodeString(capturedPayload)
+	var testJSON map[string]interface{}
+	if json.Unmarshal(raw, &testJSON) == nil {
+		t.Fatal("broker should not be able to parse encrypted payload as JSON")
+	}
+	// Broker with wrong identity cannot decrypt
+	wrongIdentity, _ := age.GenerateX25519Identity()
+	_, decryptErr := DecryptPayload(capturedPayload, []age.Identity{wrongIdentity})
+	if decryptErr == nil {
+		t.Fatal("broker (wrong identity) should not be able to decrypt the payload")
+	}
+}
+
+// ── Response outer_hash tampering detection E2E ─────────────────────────────
+
+func TestResponseOuterHashTamperingE2E(t *testing.T) {
+	identity, _ := age.GenerateX25519Identity()
+	recipientStr := identity.Recipient().String()
+
+	// Server seals response with WRONG intent_id in outer_hash
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req RelayRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		inner, _ := DecryptPayload(req.EncryptedPayload, []age.Identity{identity})
+		stanzas := make([]*age.Stanza, len(inner.Stanzas))
+		for i, s := range inner.Stanzas {
+			body, _ := base64.RawStdEncoding.DecodeString(s.Body)
+			stanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: body}
+		}
+		fileKey, _ := identity.Unwrap(stanzas)
+		ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
+		var clientPub [32]byte
+		copy(clientPub[:], ephKeyBytes)
+
+		// Build response with WRONG intent_id
+		respInner, _ := BuildResponsePayload("wrong-intent-id", fileKey)
+		sealed, _ := SealResponse(*respInner, clientPub)
+		json.NewEncoder(w).Encode(RelayResponse{EncryptedPayload: sealed})
+	}))
+	defer server.Close()
+
+	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
+	fileKey := make([]byte, 16)
+	rand.Read(fileKey)
+	stanzas, _ := relayRecipient.Wrap(fileKey)
+
+	tag := ComputeTag(recipientStr)
+	relayIdentity := &RelayIdentity{
+		Tag:    tag,
+		Remote: RemoteConfig{URL: server.URL, UnwrapRecipient: recipientStr},
+	}
+
+	_, err := relayIdentity.Unwrap(stanzas)
+	if err == nil {
+		t.Fatal("expected error for response outer_hash tampering")
+	}
+	if !strings.Contains(err.Error(), "outer_hash") {
+		t.Fatalf("error should mention outer_hash, got: %v", err)
+	}
 }
