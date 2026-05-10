@@ -18,7 +18,7 @@ Authoritative design for the async (brokered) decryption flow in `age-plugin-rel
 |---|---|
 | Plugin holds zero key material | Existing plugin design |
 | Tag = `SHA-256(inner_recipient_string)[:16]` for routing | Existing identity format |
-| Encrypted payloads (age-encrypted requests, NaCl box responses) for E2E confidentiality | `payload.go`, `envelope.go` |
+| Encrypted payloads (age-encrypted requests, age-encrypted responses) for E2E confidentiality | `payload.go`, `envelope.go` |
 | Outer hash binding encrypted payload to cleartext routing fields | `payload.go` |
 | `action`-driven, version-tagged JSON HTTP contract | Existing wire format |
 | File-key confidentiality via age-wrapped stanzas | Existing recipient model |
@@ -93,7 +93,7 @@ Responses: see §4.
 | Status | Body | Meaning |
 |---|---|---|
 | `200 OK` | `{"status":"pending"}` | Keep polling |
-| `200 OK` | `{"status":"fulfilled", "encrypted_payload": "..."}` | Plugin opens NaCl box with its ephemeral private key, verifies outer_hash |
+| `200 OK` | `{"status":"fulfilled", "encrypted_payload": "..."}` | Plugin decrypts with its ephemeral identity, verifies outer_hash |
 | `200 OK` | `{"status":"rejected"}` | Operator declined; plugin returns failure |
 | `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
 
@@ -146,11 +146,11 @@ The response contains **no broker-asserted metadata** — no `created_at`, no br
   "version": 1,
   "action": "fulfill",
   "intent_id": "a3f1...",
-  "encrypted_payload": "<base64: NaCl box sealed inner response>"
+  "encrypted_payload": "<base64: age-encrypted inner response>"
 }
 ```
 
-- `encrypted_payload` format: NaCl `box.Seal` of `{nonce, outer_hash, file_key}` to the plugin's ephemeral key from the original request.
+- `encrypted_payload` format: `age.Encrypt` of `{nonce, outer_hash, file_key}` to the plugin's ephemeral recipient from the original request.
 
 Response: `200 OK` on success, `404` if `intent_id` is unknown, `409` if already terminal.
 
@@ -215,7 +215,7 @@ Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path 
 
 ### 8.3. Replay protection
 - Encrypted payload: age encryption uses unique ephemeral keys per encryption. Replaying a captured `unwrap` to the broker either collides (`409`) or, if the original was already cleaned up, creates a duplicate intent that the operator verifies via `expires_at` and outer hash.
-- Response payload: NaCl box uses unique nonces. Replaying a captured `fulfill` to a different intent fails because `outer_hash` inside the sealed response is bound to the original `intent_id`.
+- Response payload: age encryption uses unique ephemeral keys. Replaying a captured `fulfill` to a different intent fails because `outer_hash` inside the encrypted response is bound to the original `intent_id`.
 
 ---
 
@@ -237,9 +237,9 @@ Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path 
 - Even with the public key, the attacker cannot create a payload containing valid age-wrapped stanzas (those require the correct file key).
 
 ### 9.4. Threat: operator response forgery
-- The operator seals `encrypted_payload` via NaCl box to the plugin's ephemeral pubkey from the original request.
-- Only a holder of the matching ephemeral private key (the plugin) can open the box.
-- A forged or tampered response fails `box.Open`. The plugin MUST treat open failure as terminal.
+- The operator age-encrypts `encrypted_payload` to the plugin's ephemeral recipient from the original request.
+- Only a holder of the matching ephemeral identity (the plugin) can decrypt it.
+- A forged or tampered response fails `age.Decrypt`. The plugin MUST treat decryption failure as terminal.
 - The response includes `outer_hash = SHA-256(intent_id)` — the plugin verifies this to ensure the response matches the original intent.
 
 ### 9.5. Known limitations
@@ -325,4 +325,4 @@ The broker has no age identity, no notion of `flow`.
 
 ## 13. Summary
 
-The async flow is the sync flow plus a queue and a CLI. The plugin generates its own `intent_id`, chooses its own poll cadence, and discovers async through a `202` response. The broker stores opaque encrypted payloads keyed by plugin-supplied IDs, indexed by tag, and emits no policy or metadata. The operator pulls, decrypts the age-encrypted payload, verifies the outer hash, unwraps locally, and fulfills with a NaCl-sealed response. Every cryptographic primitive is inherited from the existing sync implementation. The broker is blind — it never sees stanzas, ephemeral keys, or file keys.
+The async flow is the sync flow plus a queue and a CLI. The plugin generates its own `intent_id`, chooses its own poll cadence, and discovers async through a `202` response. The broker stores opaque encrypted payloads keyed by plugin-supplied IDs, indexed by tag, and emits no policy or metadata. The operator pulls, decrypts the age-encrypted payload, verifies the outer hash, unwraps locally, and fulfills with an age-encrypted response. Every cryptographic primitive is inherited from the existing sync implementation. The broker is blind — it never sees stanzas, ephemeral keys, or file keys.

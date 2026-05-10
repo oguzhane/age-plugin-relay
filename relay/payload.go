@@ -1,10 +1,11 @@
 // Package relay — payload.go provides encrypted payload construction and verification.
 //
 // The encrypted payload feature provides end-to-end confidentiality through a
-// zero-trust broker. Request payloads are age-encrypted to the operator's
-// recipient. Response payloads are NaCl box-sealed to the plugin's ephemeral key.
-// Both directions include a SHA-256 outer hash binding the encrypted blob to the
-// cleartext routing fields, ensuring tamper detection.
+// zero-trust broker. Both directions use age encryption as the sole primitive:
+// request payloads are age-encrypted to the operator's recipient, and response
+// payloads are age-encrypted to the plugin's ephemeral recipient. Both directions
+// include a SHA-256 outer hash binding the encrypted blob to the cleartext routing
+// fields, ensuring tamper detection.
 package relay
 
 import (
@@ -31,10 +32,10 @@ type InnerRequestPayload struct {
 	OuterHash    string        `json:"outer_hash"`    // SHA-256 of outer fields
 	ExpiresAt    int64         `json:"expires_at"`    // Unix timestamp (seconds)
 	Stanzas      []RelayStanza `json:"stanzas"`       // inner age stanzas
-	EphemeralKey string        `json:"ephemeral_key"` // base64 X25519 public key
+	EphemeralKey string        `json:"ephemeral_key"` // age recipient string (age1...)
 }
 
-// InnerResponsePayload is the NaCl box-sealed payload sent from the operator
+// InnerResponsePayload is the age-encrypted payload sent from the operator
 // back to the plugin. It contains the unwrapped file key and integrity fields.
 type InnerResponsePayload struct {
 	Nonce     string `json:"nonce"`      // 16 random bytes, hex-encoded
@@ -139,7 +140,7 @@ func VerifyRequestPayload(inner *InnerRequestPayload, version int, action, inten
 
 // BuildRequestPayload constructs an InnerRequestPayload with a fresh nonce and
 // the computed outer hash.
-func BuildRequestPayload(version int, action, intentID, tag string, expiresAt int64, stanzas []RelayStanza, ephemeralKeyB64 string) (*InnerRequestPayload, error) {
+func BuildRequestPayload(version int, action, intentID, tag string, expiresAt int64, stanzas []RelayStanza, ephemeralRecipient string) (*InnerRequestPayload, error) {
 	nonce, err := generateNonce()
 	if err != nil {
 		return nil, err
@@ -149,7 +150,7 @@ func BuildRequestPayload(version int, action, intentID, tag string, expiresAt in
 		OuterHash:    OuterHashRequest(version, action, intentID, tag, expiresAt),
 		ExpiresAt:    expiresAt,
 		Stanzas:      stanzas,
-		EphemeralKey: ephemeralKeyB64,
+		EphemeralKey: ephemeralRecipient,
 	}, nil
 }
 

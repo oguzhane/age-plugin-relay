@@ -1,7 +1,7 @@
 // relay-server is a minimal HTTP server that unwraps age stanzas using a local
 // identity file. It implements the age-plugin-relay HTTP contract with mandatory
 // encrypted payload — all requests contain age-encrypted inner payloads, all
-// responses are NaCl box sealed.
+// responses are age-encrypted.
 //
 // Usage:
 //
@@ -164,14 +164,6 @@ func main() {
 			}
 		}
 
-		ephKeyBytes, err := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
-		if err != nil || len(ephKeyBytes) != 32 {
-			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "invalid ephemeral key in payload"})
-			return
-		}
-		var clientPub [32]byte
-		copy(clientPub[:], ephKeyBytes)
-
 		// 4. Try each identity to unwrap.
 		for _, id := range identities {
 			fileKey, err := id.Unwrap(stanzas)
@@ -186,8 +178,8 @@ func main() {
 					return
 				}
 
-				// 6. Seal with NaCl box to plugin's ephemeral key.
-				sealed, err := relay.SealResponse(*respInner, clientPub)
+				// 6. Seal with age encryption to plugin's ephemeral recipient.
+				sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "sealing response"})
 					return

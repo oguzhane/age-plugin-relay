@@ -19,12 +19,12 @@ func TestSealOpenResponse(t *testing.T) {
 		FileKey:   base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef")),
 	}
 
-	sealed, err := SealResponse(inner, client.PublicKey)
+	sealed, err := SealResponse(inner, client.RecipientString())
 	if err != nil {
 		t.Fatalf("SealResponse: %v", err)
 	}
 
-	recovered, err := OpenResponse(sealed, client.PrivateKey)
+	recovered, err := OpenResponse(sealed, client.Identity)
 	if err != nil {
 		t.Fatalf("OpenResponse: %v", err)
 	}
@@ -50,16 +50,17 @@ func TestOpenResponseWrongKey(t *testing.T) {
 		FileKey:   "ZmlsZWtleQ",
 	}
 
-	sealed, _ := SealResponse(inner, client.PublicKey)
+	sealed, _ := SealResponse(inner, client.RecipientString())
 
-	_, err := OpenResponse(sealed, other.PrivateKey)
+	_, err := OpenResponse(sealed, other.Identity)
 	if err == nil {
 		t.Fatal("expected error when opening with wrong key")
 	}
 }
 
 func TestOpenResponseTruncated(t *testing.T) {
-	_, err := OpenResponse("dG9vc2hvcnQ", [32]byte{})
+	ek, _ := GenerateEphemeral()
+	_, err := OpenResponse("dG9vc2hvcnQ", ek.Identity)
 	if err == nil {
 		t.Fatal("expected error for truncated sealed data")
 	}
@@ -73,25 +74,28 @@ func TestSealResponseDifferentEachTime(t *testing.T) {
 		FileKey:   "ZmlsZWtleQ",
 	}
 
-	sealed1, _ := SealResponse(inner, client.PublicKey)
-	sealed2, _ := SealResponse(inner, client.PublicKey)
+	sealed1, _ := SealResponse(inner, client.RecipientString())
+	sealed2, _ := SealResponse(inner, client.RecipientString())
 
 	if sealed1 == sealed2 {
-		t.Fatal("two seals should differ (different server ephemerals + nonces)")
+		t.Fatal("two seals should differ (age uses internal ephemeral keys)")
 	}
 }
 
 func TestEphemeralClear(t *testing.T) {
 	ek, _ := GenerateEphemeral()
 	ek.Clear()
-	var zero [32]byte
-	if ek.PrivateKey != zero {
-		t.Fatal("private key not zeroed after Clear()")
+	if ek.Identity != nil {
+		t.Fatal("Identity not nil after Clear()")
+	}
+	if ek.Recipient != nil {
+		t.Fatal("Recipient not nil after Clear()")
 	}
 }
 
 func TestOpenResponseBadBase64(t *testing.T) {
-	_, err := OpenResponse("not-valid-base64!!!@@@", [32]byte{})
+	ek, _ := GenerateEphemeral()
+	_, err := OpenResponse("not-valid-base64!!!@@@", ek.Identity)
 	if err == nil {
 		t.Fatal("expected error for invalid base64")
 	}
@@ -105,35 +109,28 @@ func TestOpenResponseTamperedCiphertext(t *testing.T) {
 		FileKey:   "ZmlsZWtleQ",
 	}
 
-	sealed, _ := SealResponse(inner, client.PublicKey)
+	sealed, _ := SealResponse(inner, client.RecipientString())
 
 	// Decode, flip a byte in the ciphertext area, re-encode.
 	raw, _ := base64.RawStdEncoding.DecodeString(sealed)
 	raw[len(raw)-1] ^= 0xFF
 	tampered := base64.RawStdEncoding.EncodeToString(raw)
 
-	_, err := OpenResponse(tampered, client.PrivateKey)
+	_, err := OpenResponse(tampered, client.Identity)
 	if err == nil {
 		t.Fatal("expected error for tampered ciphertext")
 	}
 }
 
-func TestDerivePublicKeyConsistency(t *testing.T) {
-	ek, _ := GenerateEphemeral()
-	derived := DerivePublicKey(ek.PrivateKey)
-	if derived != ek.PublicKey {
-		t.Fatalf("DerivePublicKey does not match GenerateEphemeral public key:\n  derived: %x\n  actual:  %x", derived, ek.PublicKey)
-	}
-}
-
 func TestEphemeralKeypairsAreUnique(t *testing.T) {
-	seen := make(map[[32]byte]bool)
+	seen := make(map[string]bool)
 	for i := 0; i < 50; i++ {
 		ek, _ := GenerateEphemeral()
-		if seen[ek.PublicKey] {
-			t.Fatalf("duplicate public key on iteration %d", i)
+		r := ek.RecipientString()
+		if seen[r] {
+			t.Fatalf("duplicate recipient on iteration %d", i)
 		}
-		seen[ek.PublicKey] = true
+		seen[r] = true
 	}
 }
 
@@ -150,12 +147,12 @@ func TestSealOpenResponseVariousSizes(t *testing.T) {
 			FileKey:   base64.RawStdEncoding.EncodeToString(data),
 		}
 
-		sealed, err := SealResponse(inner, client.PublicKey)
+		sealed, err := SealResponse(inner, client.RecipientString())
 		if err != nil {
 			t.Fatalf("SealResponse (size=%d): %v", size, err)
 		}
 
-		recovered, err := OpenResponse(sealed, client.PrivateKey)
+		recovered, err := OpenResponse(sealed, client.Identity)
 		if err != nil {
 			t.Fatalf("OpenResponse (size=%d): %v", size, err)
 		}

@@ -37,7 +37,7 @@ type Intent struct {
 	Status Status
 
 	// EncryptedPayload is set when the operator fulfills the intent.
-	// Opaque to the broker — NaCl box sealed to the plugin's ephemeral key.
+	// Opaque to the broker — age-encrypted to the plugin's ephemeral recipient.
 	EncryptedPayload string
 
 	// CreatedAt is when the broker received the intent. Used for TTL enforcement.

@@ -155,21 +155,7 @@ func main() {
 				continue
 			}
 
-			// 4. Decode ephemeral key from inner payload.
-			ephKeyBytes, err := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
-			if err != nil || len(ephKeyBytes) != 32 {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid ephemeral key — rejecting\n")
-				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
-				}
-				clear(fileKey)
-				continue
-			}
-
-			var clientPub [32]byte
-			copy(clientPub[:], ephKeyBytes)
-
-			// 5. Build response payload and seal.
+			// 4. Build response payload and seal with age encryption to plugin's ephemeral recipient.
 			respInner, err := relay.BuildResponsePayload(intent.IntentID, fileKey)
 			clear(fileKey)
 			if err != nil {
@@ -180,7 +166,7 @@ func main() {
 				continue
 			}
 
-			sealed, err := relay.SealResponse(*respInner, clientPub)
+			sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Seal error: %v — rejecting\n", err)
 				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {

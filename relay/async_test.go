@@ -145,12 +145,12 @@ func TestAsyncEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ephemeral.Clear()
-	ephemeralB64 := base64.RawStdEncoding.EncodeToString(ephemeral.PublicKey[:])
+	ephemeralRecipient := ephemeral.RecipientString()
 
 	expiresAt := time.Now().Add(5 * time.Minute).Unix()
 
 	// Build and encrypt inner payload.
-	innerReq, err := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralB64)
+	innerReq, err := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,12 +224,9 @@ func TestAsyncEndToEnd(t *testing.T) {
 	}
 	t.Log("Operator unwrapped file key")
 
-	// Operator seals response to plugin's ephemeral key.
-	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
-	var clientPub [32]byte
-	copy(clientPub[:], ephKeyBytes)
+	// Operator seals response to plugin's ephemeral recipient.
 	respInner, _ := relay.BuildResponsePayload(intentID, recoveredFileKey)
-	sealed, err := relay.SealResponse(*respInner, clientPub)
+	sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 	if err != nil {
 		t.Fatalf("Operator seal failed: %v", err)
 	}
@@ -264,7 +261,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	t.Log("Plugin polled -> fulfilled")
 
 	// Plugin decrypts the response.
-	respPayload, err := relay.OpenResponse(pollResult.EncryptedPayload, ephemeral.PrivateKey)
+	respPayload, err := relay.OpenResponse(pollResult.EncryptedPayload, ephemeral.Identity)
 	if err != nil {
 		t.Fatalf("Plugin decrypt failed: %v", err)
 	}
@@ -539,12 +536,9 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 		t.Fatalf("operator unwrap: %v", err)
 	}
 
-	// Operator seals response to plugin's ephemeral key.
-	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
-	var clientPub [32]byte
-	copy(clientPub[:], ephKeyBytes)
+	// Operator seals response to plugin's ephemeral recipient.
 	respInner, _ := relay.BuildResponsePayload(intent.IntentID, opFileKey)
-	sealed, err := relay.SealResponse(*respInner, clientPub)
+	sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,9 +677,9 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 
 	eph, _ := relay.GenerateEphemeral()
 	defer eph.Clear()
-	ephB64 := base64.RawStdEncoding.EncodeToString(eph.PublicKey[:])
+	ephRecipient := eph.RecipientString()
 
-	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephB64)
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephRecipient)
 	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
 	// Submit to broker.
@@ -733,10 +727,8 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	}
 	opFileKey, _ := operatorIdentity.Unwrap(ageStanzas)
 
-	var clientPub [32]byte
-	copy(clientPub[:], eph.PublicKey[:])
 	respInner, _ := relay.BuildResponsePayload(intentID, opFileKey)
-	sealed, _ := relay.SealResponse(*respInner, clientPub)
+	sealed, _ := relay.SealResponse(*respInner, inner.EphemeralKey)
 
 	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
 	fb, _ := json.Marshal(fulfillReq)
@@ -764,7 +756,7 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	}
 
 	// But the plugin CAN decrypt it.
-	decryptedResp, err := relay.OpenResponse(pollResult.EncryptedPayload, eph.PrivateKey)
+	decryptedResp, err := relay.OpenResponse(pollResult.EncryptedPayload, eph.Identity)
 	if err != nil {
 		t.Fatalf("plugin decrypt: %v", err)
 	}
@@ -797,9 +789,9 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 	// Build inner payload with correct outer hash.
 	eph, _ := relay.GenerateEphemeral()
 	defer eph.Clear()
-	ephB64 := base64.RawStdEncoding.EncodeToString(eph.PublicKey[:])
+	ephRecipient := eph.RecipientString()
 
-	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, nil, ephB64)
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, nil, ephRecipient)
 	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
 	// Submit with correct outer fields.

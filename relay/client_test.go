@@ -108,7 +108,7 @@ func TestExtractFileKeyWrongKey(t *testing.T) {
 
 	respInner, _ := BuildResponsePayload(intentID, fileKey)
 	ek1, _ := GenerateEphemeral()
-	sealed, _ := SealResponse(*respInner, ek1.PublicKey)
+	sealed, _ := SealResponse(*respInner, ek1.RecipientString())
 
 	ek2, _ := GenerateEphemeral()
 	resp := RelayResponse{EncryptedPayload: sealed}
@@ -124,7 +124,7 @@ func TestExtractFileKeyWrongIntentID(t *testing.T) {
 
 	respInner, _ := BuildResponsePayload("intent-A", fileKey)
 	ek, _ := GenerateEphemeral()
-	sealed, _ := SealResponse(*respInner, ek.PublicKey)
+	sealed, _ := SealResponse(*respInner, ek.RecipientString())
 
 	resp := RelayResponse{EncryptedPayload: sealed}
 	_, err := extractFileKey(resp, ek, "intent-B")
@@ -145,7 +145,7 @@ func TestFileKeyRecoveryVariousSizes(t *testing.T) {
 
 			respInner, _ := BuildResponsePayload(intentID, fileKey)
 			ek, _ := GenerateEphemeral()
-			sealed, _ := SealResponse(*respInner, ek.PublicKey)
+			sealed, _ := SealResponse(*respInner, ek.RecipientString())
 
 			resp := RelayResponse{EncryptedPayload: sealed}
 			recovered, err := extractFileKey(resp, ek, intentID)
@@ -457,11 +457,8 @@ func TestEncryptedPayloadAsyncE2E(t *testing.T) {
 	}
 	unwrappedKey, _ := identity.Unwrap(opStanzas)
 
-	ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
-	var clientPub [32]byte
-	copy(clientPub[:], ephKeyBytes)
 	respInner, _ := BuildResponsePayload(reqCopy.IntentID, unwrappedKey)
-	sealed, _ := SealResponse(*respInner, clientPub)
+	sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
 	mu.Lock()
 	fulfillPayload = sealed

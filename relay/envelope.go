@@ -1,98 +1,100 @@
-// Package relay — envelope.go provides ephemeral X25519 response encryption.
+// Package relay — envelope.go provides ephemeral age response encryption.
 //
 // The operator seals an InnerResponsePayload (containing the file key) using
-// NaCl box (X25519 + XSalsa20-Poly1305) to the plugin's ephemeral public key.
-// The plugin opens the sealed response with its ephemeral private key.
+// age encryption (X25519 + HKDF + ChaCha20-Poly1305) to the plugin's ephemeral
+// age recipient. The plugin opens the sealed response with its ephemeral identity.
+//
+// Both directions (request and response) now use age encryption as the sole
+// cryptographic primitive.
 package relay
 
 import (
-	"crypto/rand"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 
-	"golang.org/x/crypto/curve25519"
-	"golang.org/x/crypto/nacl/box"
+	"filippo.io/age"
 )
 
-// EphemeralKeypair holds a per-request X25519 keypair for response encryption.
+// EphemeralKeypair holds a per-request age X25519 identity for response encryption.
 type EphemeralKeypair struct {
-	PublicKey  [32]byte
-	PrivateKey [32]byte
+	Identity  *age.X25519Identity
+	Recipient *age.X25519Recipient
 }
 
-// GenerateEphemeral creates a new random X25519 keypair.
+// GenerateEphemeral creates a new random age X25519 identity/recipient pair.
 func GenerateEphemeral() (*EphemeralKeypair, error) {
-	pub, priv, err := box.GenerateKey(rand.Reader)
+	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		return nil, fmt.Errorf("generating ephemeral keypair: %w", err)
 	}
-	return &EphemeralKeypair{PublicKey: *pub, PrivateKey: *priv}, nil
+	return &EphemeralKeypair{
+		Identity:  id,
+		Recipient: id.Recipient(),
+	}, nil
 }
 
-// Clear zeros the private key material.
+// Clear nils the identity and recipient to prevent further use.
+// Note: Go's garbage collector may not zero freed memory immediately.
 func (ek *EphemeralKeypair) Clear() {
-	clear(ek.PrivateKey[:])
+	ek.Identity = nil
+	ek.Recipient = nil
 }
 
-// SealResponse encrypts an InnerResponsePayload to the client's ephemeral public
-// key. Called by the operator/server. Uses an ephemeral server keypair per
-// response so the sealed box is unique even for identical payloads.
+// RecipientString returns the bech32-encoded age recipient string (age1...).
+func (ek *EphemeralKeypair) RecipientString() string {
+	return ek.Recipient.String()
+}
+
+// SealResponse encrypts an InnerResponsePayload to the given age recipient string.
+// Called by the operator/server. Each call uses age's internal ephemeral key, so
+// the ciphertext is unique even for identical payloads.
 //
-// Returns base64-encoded: serverPub(32) || nonce(24) || ciphertext.
-func SealResponse(inner InnerResponsePayload, clientPub [32]byte) (string, error) {
+// Returns base64-encoded age ciphertext.
+func SealResponse(inner InnerResponsePayload, recipientStr string) (string, error) {
+	recipient, err := ParseRecipientString(recipientStr)
+	if err != nil {
+		return "", fmt.Errorf("parsing ephemeral recipient: %w", err)
+	}
+
 	plaintext, err := json.Marshal(inner)
 	if err != nil {
 		return "", fmt.Errorf("marshaling inner response: %w", err)
 	}
 
-	// Generate a one-time server keypair for this response.
-	serverPub, serverPriv, err := box.GenerateKey(rand.Reader)
+	var buf bytes.Buffer
+	w, err := age.Encrypt(&buf, recipient)
 	if err != nil {
-		return "", fmt.Errorf("generating server ephemeral key: %w", err)
+		return "", fmt.Errorf("creating age encryptor: %w", err)
 	}
-	defer clear(serverPriv[:])
-
-	var nonce [24]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", fmt.Errorf("generating nonce: %w", err)
+	if _, err := w.Write(plaintext); err != nil {
+		return "", fmt.Errorf("writing to age encryptor: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("closing age encryptor: %w", err)
 	}
 
-	sealed := box.Seal(nil, plaintext, &nonce, &clientPub, serverPriv)
-
-	// Wire format: serverPub(32) || nonce(24) || sealed
-	out := make([]byte, 0, 32+24+len(sealed))
-	out = append(out, serverPub[:]...)
-	out = append(out, nonce[:]...)
-	out = append(out, sealed...)
-
-	return base64.RawStdEncoding.EncodeToString(out), nil
+	return base64.RawStdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// OpenResponse decrypts a sealed InnerResponsePayload using the client's
-// ephemeral private key. Called by the plugin.
-// Parses: serverPub(32) || nonce(24) || ciphertext.
-func OpenResponse(sealed string, clientPriv [32]byte) (*InnerResponsePayload, error) {
-	defer clear(clientPriv[:])
-
+// OpenResponse decrypts a sealed InnerResponsePayload using the plugin's
+// ephemeral age identity. Called by the plugin.
+func OpenResponse(sealed string, identity *age.X25519Identity) (*InnerResponsePayload, error) {
 	raw, err := base64.RawStdEncoding.DecodeString(sealed)
 	if err != nil {
 		return nil, fmt.Errorf("decoding sealed response: %w", err)
 	}
 
-	if len(raw) < 32+24+box.Overhead {
-		return nil, fmt.Errorf("sealed response too short (%d bytes)", len(raw))
+	r, err := age.Decrypt(bytes.NewReader(raw), identity)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting sealed response: %w", err)
 	}
 
-	var serverPub [32]byte
-	var nonce [24]byte
-	copy(serverPub[:], raw[:32])
-	copy(nonce[:], raw[32:56])
-	ciphertext := raw[56:]
-
-	plaintext, ok := box.Open(nil, ciphertext, &nonce, &serverPub, &clientPriv)
-	if !ok {
-		return nil, fmt.Errorf("decrypting sealed response failed (authentication error)")
+	plaintext, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading decrypted response: %w", err)
 	}
 
 	var inner InnerResponsePayload
@@ -100,13 +102,4 @@ func OpenResponse(sealed string, clientPriv [32]byte) (*InnerResponsePayload, er
 		return nil, fmt.Errorf("parsing inner response payload: %w", err)
 	}
 	return &inner, nil
-}
-
-// DerivePublicKey derives the X25519 public key from a private key.
-// Used only in tests.
-func DerivePublicKey(priv [32]byte) [32]byte {
-	pub, _ := curve25519.X25519(priv[:], curve25519.Basepoint)
-	var out [32]byte
-	copy(out[:], pub)
-	return out
 }

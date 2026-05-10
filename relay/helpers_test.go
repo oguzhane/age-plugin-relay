@@ -58,14 +58,9 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 			return
 		}
 
-		// Extract ephemeral key.
-		ephKeyBytes, _ := base64.RawStdEncoding.DecodeString(inner.EphemeralKey)
-		var clientPub [32]byte
-		copy(clientPub[:], ephKeyBytes)
-
 		// Build and seal response.
 		respInner, _ := BuildResponsePayload(req.IntentID, fileKey)
-		sealed, _ := SealResponse(*respInner, clientPub)
+		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
 		resp := RelayResponse{EncryptedPayload: sealed}
 		if req.Stream {

@@ -56,7 +56,7 @@ type RelayStanza struct {
 
 // RelayResponse is the JSON response from the relay endpoint.
 type RelayResponse struct {
-	EncryptedPayload string `json:"encrypted_payload,omitempty"` // NaCl box sealed inner response
+	EncryptedPayload string `json:"encrypted_payload,omitempty"` // age-encrypted inner response
 	Error            string `json:"error,omitempty"`
 }
 
@@ -80,7 +80,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	}
 	defer ephemeral.Clear()
 
-	ephemeralB64 := base64.RawStdEncoding.EncodeToString(ephemeral.PublicKey[:])
+	ephemeralRecipient := ephemeral.RecipientString()
 
 	// Compute outer fields.
 	expiresAt := time.Now().Add(remote.TimeoutDuration()).Unix()
@@ -98,7 +98,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	}
 
 	// Build and encrypt inner payload.
-	inner, err := BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralB64)
+	inner, err := BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
 	if err != nil {
 		return nil, fmt.Errorf("building inner payload: %w", err)
 	}
@@ -277,14 +277,14 @@ func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair, intentID
 	return extractFileKey(relayResp, ephemeral, intentID)
 }
 
-// extractFileKey opens the NaCl-sealed response, verifies the outer hash,
+// extractFileKey opens the age-encrypted response, verifies the outer hash,
 // and returns the file key.
 func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, intentID string) ([]byte, error) {
 	if resp.EncryptedPayload == "" {
 		return nil, fmt.Errorf("relay response contains no encrypted_payload")
 	}
 
-	inner, err := OpenResponse(resp.EncryptedPayload, ephemeral.PrivateKey)
+	inner, err := OpenResponse(resp.EncryptedPayload, ephemeral.Identity)
 	if err != nil {
 		return nil, fmt.Errorf("opening sealed response: %w", err)
 	}

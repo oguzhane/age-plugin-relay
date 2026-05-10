@@ -26,7 +26,7 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
 
 **Encryption** uses only the inner recipient's public key — no relay, no network, no hardware. The plugin delegates to `age.ParseRecipients()`, so it works with any recipient type the `age` library (or plugins in `PATH`) can parse.
 
-**Decryption** builds an encrypted inner payload (age-encrypted to the operator's recipient), sends it to the relay endpoint, and decrypts the NaCl box sealed response. The relay/broker never sees plaintext stanzas or file keys.
+**Decryption** builds an encrypted inner payload (age-encrypted to the operator's recipient), sends it to the relay endpoint, and decrypts the age-encrypted response. The relay/broker never sees plaintext stanzas or file keys.
 
 ## Install
 
@@ -209,7 +209,7 @@ Content-Type: application/json
   "stanzas": [
     { "type": "X25519", "args": ["..."], "body": "..." }
   ],
-  "ephemeral_key": "<base64: X25519 ephemeral public key>"
+  "ephemeral_key": "<age1... ephemeral recipient string>"
 }
 ```
 
@@ -221,11 +221,11 @@ The `outer_hash` binds the encrypted payload to the cleartext routing fields. Th
 
 ```json
 {
-  "encrypted_payload": "<base64: NaCl box sealed inner response>"
+  "encrypted_payload": "<base64: age-encrypted inner response>"
 }
 ```
 
-The `encrypted_payload` contains a NaCl box (X25519 + XSalsa20-Poly1305) sealed to the plugin's ephemeral key. The inner response is:
+The `encrypted_payload` contains an age-encrypted blob sealed to the plugin's ephemeral recipient. The inner response is:
 
 ```json
 {
@@ -268,7 +268,7 @@ Example SSE response:
 : heartbeat
 
 event: result
-data: {"encrypted_payload": "<NaCl box blob>"}
+data: {"encrypted_payload": "<age-encrypted blob>"}
 
 ```
 
@@ -332,7 +332,7 @@ age-plugin-relay/
 │   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser, async polling
 │   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote, PollInterval
 │   ├── payload.go                      # Encrypted payload: EncryptPayload, DecryptPayload, OuterHash, inner types
-│   ├── envelope.go                     # NaCl box response encryption: SealResponse, OpenResponse
+│   ├── envelope.go                     # Age response encryption: SealResponse, OpenResponse
 │   ├── broker/                         # Broker queue package (package broker)
 │   │   ├── types.go                    # Intent, Status, PullResponse, PollResponse
 │   │   ├── queue.go                    # In-memory intent queue with TTL sweep
@@ -343,7 +343,7 @@ age-plugin-relay/
 │   ├── client_test.go                 # Client tests (PostToRelay, extractFileKey, sanitizeErrorMsg, auth, SSE, async)
 │   ├── config_test.go                 # Config tests (LoadConfig, LookupRemote, timeout, poll interval)
 │   ├── payload_test.go                # Encrypted payload tests (outer hash, encrypt/decrypt, verify, tamper detection)
-│   ├── envelope_test.go               # Envelope seal/open unit tests (NaCl box)
+│   ├── envelope_test.go               # Envelope seal/open unit tests (age encryption)
 │   ├── async_test.go                  # Async (Control Tower) tests (broker protocol, E2E)
 │   ├── integration_test.go            # Integration tests (age.Encrypt/Decrypt E2E, broker blindness, tampering)
 │   └── e2e_test.go                    # E2E tests (real binaries, full user flow)
@@ -367,7 +367,7 @@ age-plugin-relay/
 
 - [`filippo.io/age`](https://pkg.go.dev/filippo.io/age) v1.3.1 — age types (`Recipient`, `Identity`, `Stanza`), recipient parsing, encryption/decryption
 - [`filippo.io/age/plugin`](https://pkg.go.dev/filippo.io/age/plugin) — Plugin framework, Bech32 encoding helpers
-- [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — X25519 and NaCl box for response envelope encryption
+- [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — Cryptographic primitives
 - [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) — Config file parsing
 
 ## Testing
@@ -414,7 +414,7 @@ go test -v ./relay/
 | `TestSanitizeErrorMsgEmpty` | Empty string returns empty |
 | `TestExtractFileKeyEmpty` | Empty response returns error |
 | `TestExtractFileKeyBadBase64` | Invalid base64 returns error |
-| `TestExtractFileKeyWrongKey` | Wrong NaCl key returns error |
+| `TestExtractFileKeyWrongKey` | Wrong ephemeral key returns error |
 | `TestExtractFileKeyWrongIntentID` | Wrong intent_id detected via outer_hash mismatch |
 | `TestFileKeyRecoveryVariousSizes` | Round-trip with 0, 1, 15, 16, 32, 64-byte file keys |
 | `TestPostToRelay5xxError` | Server 500 returns error |
@@ -470,14 +470,13 @@ go test -v ./relay/
 
 | Test | What it validates |
 |---|---|
-| `TestSealOpenResponse` | NaCl box seal/open round-trip with structured inner response |
-| `TestOpenResponseWrongKey` | Envelope rejects wrong private key |
+| `TestSealOpenResponse` | Age seal/open round-trip with structured inner response |
+| `TestOpenResponseWrongKey` | Envelope rejects wrong ephemeral identity |
 | `TestOpenResponseTruncated` | Envelope rejects truncated sealed data |
 | `TestOpenResponseBadBase64` | Invalid base64 returns error |
 | `TestOpenResponseTamperedCiphertext` | Flipped byte in ciphertext detected |
 | `TestSealResponseDifferentEachTime` | Two seals produce different ciphertext |
-| `TestEphemeralClear` | Private key is zeroed after `Clear()` |
-| `TestDerivePublicKeyConsistency` | `DerivePublicKey` matches `GenerateEphemeral` output |
+| `TestEphemeralClear` | Identity and recipient are nil after `Clear()` |
 | `TestEphemeralKeypairsAreUnique` | 50 generated keypairs are all unique |
 | `TestSealOpenResponseVariousSizes` | Round-trip with 0, 1, 15, 16, 32, 64-byte file keys |
 
@@ -603,21 +602,17 @@ All requests and responses use mandatory encrypted payloads. There are no config
 2. Operator verifies `outer_hash` (tamper detection) and `expires_at`
 3. Operator unwraps stanzas → file key
 4. Operator builds inner response: `{nonce, outer_hash, file_key}`
-5. Operator NaCl box seals the response to the plugin's ephemeral key
+5. Operator age-encrypts the response to the plugin's ephemeral recipient
 
 ### Wire format
 
-The `encrypted_payload` in the response contains base64-encoded:
-
-```
-serverPub (32 bytes) || nonce (24 bytes) || NaCl box ciphertext
-```
+The `encrypted_payload` in the response contains base64-encoded age ciphertext (same format as the request direction).
 
 ### Security properties
 
 - **Broker blindness** — broker sees only `version`, `action`, `intent_id`, `tag`, and opaque ciphertext. Stanzas, ephemeral keys, and file keys are never visible.
 - **Tamper detection** — `outer_hash` inside the encrypted payload binds it to the cleartext routing fields. Broker cannot modify any outer field without detection.
-- **Forward secrecy** — both plugin and operator generate fresh ephemeral keypairs per intent, discarded after use.
+- **Forward secrecy** — ephemeral age keypairs per intent, discarded after use.
 - **Transport-independent** — encrypted end-to-end even over plaintext HTTP.
 
 See [`docs/encrypted-payload-spec.md`](docs/encrypted-payload-spec.md) for the full specification.
@@ -651,11 +646,11 @@ Plugin                       Broker                      Operator
                                                          3. age.Decrypt(encrypted_payload)
                                                          4. Verify outer_hash + expires_at
                                                          5. Unwrap stanzas locally
-                                                         6. Build + seal response → NaCl box
+                                                         6. Build + seal response → age.Encrypt
                                                     ◄──  7. fulfill (encrypted_payload)
 8. poll intent_id        ──►
    ◄── fulfilled + encrypted_payload
-9. Open NaCl box with ephemeral private key
+9. age.Decrypt with ephemeral identity
 10. Verify response outer_hash → file key
 ```
 

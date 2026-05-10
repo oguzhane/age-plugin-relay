@@ -87,7 +87,7 @@ This is the same public key the relay recipient was created with. The identity f
   "stanzas": [
     { "type": "X25519", "args": ["..."], "body": "..." }
   ],
-  "ephemeral_key": "<base64: X25519 ephemeral public key>"
+  "ephemeral_key": "<age1... ephemeral recipient string>"
 }
 ```
 
@@ -96,7 +96,7 @@ This is the same public key the relay recipient was created with. The identity f
 | `nonce` | 16 random bytes, hex-encoded. Ensures ciphertext uniqueness at the protocol level. Discarded after decryption. |
 | `outer_hash` | `SHA-256("version.action.intent_id.tag.expires_at")` — dot-separated, canonical. Binds the encrypted payload to the outer routing fields including expiry. |
 | `stanzas` | Inner age stanzas (same format as today, base64 raw standard bodies). |
-| `ephemeral_key` | Plugin's ephemeral X25519 public key for the response envelope. |
+| `ephemeral_key` | Plugin's ephemeral age recipient string (`age1...`) for the response envelope. |
 
 ### 4.3. Encryption
 
@@ -141,7 +141,7 @@ Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Determini
   "version": 1,
   "action": "fulfill",
   "intent_id": "a3f1...",
-  "encrypted_payload": "<base64: NaCl box blob>"
+  "encrypted_payload": "<base64: age-encrypted inner response>"
 }
 ```
 
@@ -150,7 +150,7 @@ Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Determini
 ```json
 {
   "status": "fulfilled",
-  "encrypted_payload": "<base64: NaCl box blob>"
+  "encrypted_payload": "<base64: age-encrypted inner response>"
 }
 ```
 
@@ -164,7 +164,7 @@ Other statuses unchanged:
 
 `404` for unknown/expired — unchanged.
 
-### 5.3. Inner payload (NaCl box sealed to plugin's ephemeral key)
+### 5.3. Inner payload (age-encrypted to plugin's ephemeral recipient)
 
 ```json
 {
@@ -182,17 +182,13 @@ Other statuses unchanged:
 
 ### 5.4. Encryption
 
-- Primitive: NaCl `box.Seal` (X25519 + XSalsa20-Poly1305).
-- Sealed to the plugin's ephemeral public key (extracted from the inner request payload).
-- The operator generates a one-time server keypair per seal.
+- Primitive: `age.Encrypt` (X25519 + HKDF + ChaCha20-Poly1305).
+- Sealed to the plugin's ephemeral age recipient (extracted from the inner request payload).
+- age internally generates a one-time ephemeral key per encryption.
 
-Wire format of the `encrypted_payload` value (base64-encoded):
+Wire format of the `encrypted_payload` value: base64-encoded standard age binary ciphertext (same format as the request direction).
 
-```
-serverPub (32 bytes) || nonce (24 bytes) || NaCl box ciphertext
-```
-
-Unchanged from the current `SealFileKey` / `OpenFileKey` format, except the plaintext is now the structured inner JSON instead of the raw 16-byte file key.
+Both directions now use the same cryptographic primitive (`age.Encrypt`/`age.Decrypt`), eliminating NaCl box entirely.
 
 ### 5.5. Outer hash construction
 
@@ -208,7 +204,7 @@ SHA-256("a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 
 ### 5.6. Plugin verification
 
-1. `NaCl box.Open(encrypted_payload, ephemeral_private_key)` → inner payload JSON.
+1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner payload JSON.
 2. Parse inner payload.
 3. Recompute `SHA-256(intent_id)` from the plugin's own stored intent_id.
 4. Compare against `outer_hash` — mismatch = tamper = fail.
@@ -241,7 +237,7 @@ The relay-server (sync flow) uses the identical wire format:
 4. Extract stanzas + ephemeral_key.
 5. Unwrap stanzas → file key.
 6. Build response inner payload: `{nonce, outer_hash, file_key}`.
-7. `NaCl box.Seal` to plugin's ephemeral key.
+7. `age.Encrypt` response to plugin's ephemeral recipient.
 8. Return response.
 
 ### Response
@@ -290,7 +286,7 @@ No security flags. Encrypted payload is the only mode. Config mode is required �
 - Broker sees only `version`, `action`, `intent_id`, `tag`, and opaque ciphertext.
 - Stanzas, ephemeral keys, and file keys are never visible to the broker.
 - Request payload: age-encrypted (recipient-agnostic).
-- Response payload: NaCl box (ephemeral X25519).
+- Response payload: age-encrypted (to ephemeral recipient).
 - Both include a protocol-level nonce ensuring unique ciphertext per intent.
 
 ### 8.2. Integrity
@@ -301,8 +297,8 @@ No security flags. Encrypted payload is the only mode. Config mode is required �
 
 ### 8.3. Forward secrecy
 
-- Plugin generates a fresh ephemeral X25519 keypair per intent.
-- Operator generates a fresh one-time keypair per seal.
+- Plugin generates a fresh ephemeral age X25519 identity per intent.
+- age internally generates fresh ephemeral keys per encryption.
 - Both discarded after use.
 
 ### 8.4. What the broker can still do
@@ -312,7 +308,7 @@ No security flags. Encrypted payload is the only mode. Config mode is required �
 | Drop intents (DoS) | Plugin times out | Plugin's local timeout bounds the loss |
 | Return `rejected` instead of `fulfilled` | Plugin fails decryption | DoS only — no cryptographic compromise |
 | Traffic analysis on `tag` | Learns per-operator volume | Future: tag blinding (out of scope) |
-| Replay stored `encrypted_payload` | NaCl box.Open fails (different ephemeral key per intent) | Cryptographically prevented |
+| Replay stored `encrypted_payload` | age.Decrypt fails (different ephemeral key per intent) | Cryptographically prevented |
 
 ### 8.5. HMAC compatibility
 
@@ -343,10 +339,10 @@ HMAC signing is **not compatible** with this feature in the current design. The 
 - `relay/payload.go` — `EncryptPayload()`, `DecryptPayload()`, `OuterHash()`, inner payload types. Shared by relay-server and relay-operator.
 
 ### Modified files
-- `relay/client.go` — always encrypt inner payload via `age.Encrypt`; always decrypt response via `NaCl box.Open` with structured inner; remove plaintext branches; new `innerRecipient` parameter on `PostToRelay`.
+- `relay/client.go` — always encrypt inner payload via `age.Encrypt`; always decrypt response via `age.Decrypt` with structured inner; remove plaintext branches; new `innerRecipient` parameter on `PostToRelay`.
 - `relay/config.go` — remove `EncryptedResponse`, `HMACKey` fields; add `UnwrapRecipient` field to `RemoteConfig`.
 - `relay/identity.go` — pass `Remote.UnwrapRecipient` to `PostToRelay`; validate `UnwrapRecipient` is set.
-- `relay/envelope.go` — `SealFileKey` / `OpenFileKey` renamed to `SealResponse` / `OpenResponse`; seal/open structured inner JSON (nonce + outer_hash + file_key) instead of raw file key bytes.
+- `relay/envelope.go` — `SealResponse` / `OpenResponse` use `age.Encrypt`/`age.Decrypt`; `EphemeralKeypair` wraps `age.X25519Identity`/`age.X25519Recipient`; seal/open structured inner JSON (nonce + outer_hash + file_key).
 - `cmd/relay-server/main.go` — decrypt `encrypted_payload`, verify `outer_hash` + `expires_at`, extract stanzas + ephemeral key, seal response.
 - `cmd/relay-operator/main.go` — same decryption logic as relay-server; remove HMAC verification.
 - `cmd/relay-broker/main.go` — rename `encrypted_file_key` to `encrypted_payload` in fulfill/poll paths; remove HMAC header extraction.
@@ -404,13 +400,13 @@ Plugin                                          Relay-Server
   │                                                  │  9. identity.Unwrap(stanzas) → file_key
   │                                                  │ 10. Build InnerResponsePayload:
   │                                                  │     {nonce, outer_hash, file_key}
-  │                                                  │ 11. NaCl box.Seal(inner, ephemeral_pub)
+  │                                                  │ 11. age.Encrypt(inner, ephemeral_recipient)
   │                                                  │
   │  200 OK                                          │
-  │  {"encrypted_payload": "<NaCl box blob>"}        │
+  │  {"encrypted_payload": "<age-encrypted blob>"}   │
   │ ◄──────────────────────────────────────────────  │
   │                                                  │
-  │ 12. NaCl box.Open(encrypted_payload, eph_priv)   │
+  │ 12. age.Decrypt(encrypted_payload, eph_identity)  │
   │ 13. Verify outer_hash == SHA-256(intent_id)      │
   │ 14. Extract file_key                             │
   │ 15. Discard ephemeral keypair                    │
@@ -457,7 +453,7 @@ Plugin                          Broker                          Operator
   │                               │                9. identity.Unwrap(stanzas) → file_key
   │                               │               10. Build InnerResponsePayload:
   │                               │                   {nonce, outer_hash, file_key}
-  │                               │               11. NaCl box.Seal(inner, ephemeral_pub)
+  │                               │               11. age.Encrypt(inner, ephemeral_recipient)
   │                               │                                │
   │                               │  POST {action:"fulfill",       │
   │                               │   intent_id,                   │
@@ -479,9 +475,9 @@ Plugin                          Broker                          Operator
   │   encrypted_payload}          │                                │
   │ ◄─────────────────────────────│                                │
   │                               │                                │
-  │ 13. NaCl box.Open(            │                                │
+  │ 13. age.Decrypt(             │                                │
   │     encrypted_payload,        │                                │
-  │     eph_priv)                 │                                │
+  │     eph_identity)             │                                │
   │ 14. Verify outer_hash         │                                │
   │     == SHA-256(intent_id)     │                                │
   │ 15. Extract file_key          │                                │
@@ -548,4 +544,4 @@ nonce               ✓ (generates it)    ✗ (opaque)          ✓ (discards it
 
 ## 13. Summary
 
-Payload encryption is mandatory and unconditional. The plugin age-encrypts request payloads to the operator's recipient. The operator NaCl-seals response payloads to the plugin's ephemeral key. Both directions include a SHA-256 outer hash binding the encrypted blob to the cleartext routing fields. The broker stores and forwards opaque blobs — it sees only version, action, intent_id, and tag. No configuration flags — encrypted is the only mode. HMAC is removed; integrity is provided by the encryption layer itself.
+Payload encryption is mandatory and unconditional. Both directions use `age.Encrypt`/`age.Decrypt` as the sole cryptographic primitive. The plugin age-encrypts request payloads to the operator's recipient. The operator age-encrypts response payloads to the plugin's ephemeral recipient. Both directions include a SHA-256 outer hash binding the encrypted blob to the cleartext routing fields. The broker stores and forwards opaque blobs — it sees only version, action, intent_id, and tag. No configuration flags — encrypted is the only mode. HMAC is removed; integrity is provided by the encryption layer itself.
