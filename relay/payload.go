@@ -14,6 +14,16 @@
 //
 // When adding a new field to RelayRequest, you MUST also add it to the
 // corresponding OuterHash function below. See ARCHITECTURE.md §3.5.
+//
+// FUNDAMENTAL PRINCIPLE — Sealed Action Binding:
+//
+// Every action value in the protocol MUST carry an encrypted_payload containing
+// an outer hash that the recipient verifies. No action is exempt — fulfill,
+// reject, and any future action MUST be sealed and verified. A cleartext-only
+// envelope (without encrypted_payload) can be forged by the broker.
+//
+// When adding a new action value, you MUST ensure it includes an
+// encrypted_payload with an outer hash. See ARCHITECTURE.md §3.5.
 package relay
 
 import (

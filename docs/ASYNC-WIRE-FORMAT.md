@@ -472,6 +472,8 @@ type RelayStanza struct {
 
 > Every field in the cleartext envelope outside `encrypted_payload` MUST be included in the outer hash. See [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
 
+> Every `action` value (fulfill, reject, etc.) MUST carry an `encrypted_payload` with an outer hash that the recipient verifies. No action is exempt. See [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
+
 | Direction | Formula | Example |
 |---|---|---|
 | Request (plugin → server/operator) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800")` |

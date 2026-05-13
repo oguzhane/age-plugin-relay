@@ -42,6 +42,11 @@ type asyncPollResponse struct {
 // EncryptedPayload is included in the outer hash (computed inside the encrypted
 // payload). If you add a new field, you MUST also add it to OuterHashRequest
 // and/or OuterHashResponse in payload.go. See ARCHITECTURE.md §3.5.
+//
+// IMPORTANT — Sealed Action Binding: Every action value (fulfill, reject, etc.)
+// MUST carry an encrypted_payload with an outer hash. The recipient MUST decrypt
+// and verify before trusting the action. If you add a new action, you MUST
+// ensure it includes a sealed encrypted_payload. See ARCHITECTURE.md §3.5.
 type RelayRequest struct {
 	Version          int    `json:"version"`
 	Action           string `json:"action"`

@@ -74,6 +74,8 @@ Each stanza:
 
 > **Complete Outer Field Binding:** The outer hash MUST include every envelope field outside `encrypted_payload`. This is a fundamental protocol invariant — see [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
 
+> **Sealed Action Binding:** Every `action` value (fulfill, reject, etc.) MUST carry an `encrypted_payload` with an outer hash that the recipient verifies. No action is exempt — a cleartext-only envelope can be forged by the broker. See [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
+
 ```
 SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")
 ```

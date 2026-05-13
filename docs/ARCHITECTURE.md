@@ -180,6 +180,14 @@ age-encrypted to the plugin's ephemeral recipient. Contains the unwrapped file k
 >
 > **Rule:** When adding a new field to `RelayRequest`, you MUST also add it to the corresponding `OuterHash*` function in `relay/payload.go`. Failing to do so creates a silent security vulnerability where the broker can tamper with the new field undetected.
 
+> **Fundamental Principle: Sealed Action Binding**
+>
+> Every `action` value in the protocol MUST carry an `encrypted_payload` containing an outer hash that the recipient verifies. No action is exempt — fulfill, reject, and any future action MUST be sealed and verified. A cleartext-only envelope (without `encrypted_payload`) is never trustworthy because the broker can forge it.
+>
+> **Why:** Without an encrypted payload, the broker can fabricate any action (e.g., fake a reject to deny service). The outer hash inside the encrypted payload — sealed to the recipient's key — is the only proof that the action originated from the legitimate party (operator or server) and was not tampered with in transit.
+>
+> **Rule:** When adding a new `action` value to the protocol, you MUST ensure it includes an `encrypted_payload` with an outer hash computed over the envelope fields. The recipient MUST decrypt and verify before trusting the action.
+
 The outer hash binds the encrypted blob to the cleartext routing fields. Any modification by the broker is detected.
 
 **Request envelope fields** (plugin → server/operator):
@@ -707,6 +715,7 @@ Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path 
 - **No secrets in the plugin** — the recipient contains only a public key string; the identity contains only a tag and remote name.
 - **End-to-end encrypted payloads** — stanzas and file keys are never visible to the broker or any intermediary.
 - **Tamper detection** — SHA-256 outer hash binds encrypted payloads to cleartext routing fields. Every envelope field outside `encrypted_payload` is included in the hash — this is a fundamental protocol invariant (see §3.5).
+- **Sealed action binding** — every `action` value (fulfill, reject, etc.) carries an `encrypted_payload` with a verified outer hash. No cleartext-only envelopes are trusted. This prevents the broker from forging actions (e.g., fabricating a reject to deny service). See §3.5.
 - **Forward secrecy** — plugin generates a fresh ephemeral age X25519 identity per intent; age internally generates fresh ephemeral keys per encryption. Both discarded after use.
 - **Transport-independent** — encrypted end-to-end even over plaintext HTTP.
 - **With SOPS key groups + Shamir** — intercepting one group's unwrapped share is information-theoretically useless without the other share(s).
