@@ -3,9 +3,11 @@ package relay
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,12 +19,42 @@ import (
 	"filippo.io/age"
 )
 
-// RelayRequest is the JSON body sent to the relay endpoint.
+// GenerateIntentID produces a random 16-byte hex string (32 chars) for use as
+// a plugin-generated intent ID in the async flow.
+func GenerateIntentID() (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("generating intent ID: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+// asyncPollResponse is the broker's response to a poll action.
+type asyncPollResponse struct {
+	Status   string          `json:"status"`
+	Response json.RawMessage `json:"response,omitempty"`
+	Error    string          `json:"error,omitempty"`
+}
+
+// RelayRequest is the JSON envelope for all relay protocol messages.
+//
+// IMPORTANT — Complete Outer Field Binding: Every field in this struct except
+// EncryptedPayload is included in the outer hash (computed inside the encrypted
+// payload). If you add a new field, you MUST also add it to OuterHashRequest
+// and/or OuterHashResponse in payload.go. See ARCHITECTURE.md §3.5.
+//
+// IMPORTANT — Sealed Action Binding: Every action value (fulfill, reject, etc.)
+// MUST carry an encrypted_payload with an outer hash. The recipient MUST decrypt
+// and verify before trusting the action. If you add a new action, you MUST
+// ensure it includes a sealed encrypted_payload. See ARCHITECTURE.md §3.5.
 type RelayRequest struct {
-	Version int           `json:"version"`
-	Action  string        `json:"action"`
-	Stream  bool          `json:"stream,omitempty"` // request SSE response
-	Stanzas []RelayStanza `json:"stanzas"`
+	Version          int    `json:"version"`
+	Action           string `json:"action"`
+	Stream           bool   `json:"stream,omitempty"`            // request SSE response
+	IntentID         string `json:"intent_id,omitempty"`         // plugin-generated, 16 random bytes hex
+	Tag              string `json:"tag,omitempty"`               // routing tag for operator pull
+	ExpiresAt        int64  `json:"expires_at,omitempty"`        // Unix timestamp (seconds)
+	EncryptedPayload string `json:"encrypted_payload,omitempty"` // age-encrypted inner payload
 }
 
 // RelayStanza is a single age stanza serialized for the relay protocol.
@@ -33,29 +65,68 @@ type RelayStanza struct {
 }
 
 // RelayResponse is the JSON response from the relay endpoint.
-// Used for both standard JSON responses and SSE event data.
 type RelayResponse struct {
-	FileKey          string `json:"file_key,omitempty"`           // base64 raw standard encoding (plaintext)
-	EncryptedFileKey string `json:"encrypted_file_key,omitempty"` // base64 sealed box (when envelope encryption is active)
+	EncryptedPayload string `json:"encrypted_payload,omitempty"` // age-encrypted inner response
 	Error            string `json:"error,omitempty"`
 }
 
 // PostToRelay sends inner stanzas to the relay URL and returns the unwrapped file key.
-// If the remote has Stream enabled and the server responds with text/event-stream,
-// the client parses SSE events until a "result" or "error" event arrives.
-func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
-	req := RelayRequest{
-		Version: 1,
-		Action:  "unwrap",
-		Stream:  remote.Stream,
-		Stanzas: make([]RelayStanza, len(stanzas)),
+// The innerRecipient is the age recipient string of the unwrapper (operator/server).
+// All payloads are encrypted — the broker sees only opaque blobs.
+//
+// If the server responds with 202 Accepted, the client switches to async polling:
+// it polls with the intent_id until the intent is fulfilled,
+// rejected, or the local timeout elapses.
+func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient string) ([]byte, error) {
+	intentID, err := GenerateIntentID()
+	if err != nil {
+		return nil, err
 	}
+
+	// Always generate ephemeral keypair for response encryption.
+	ephemeral, err := GenerateEphemeral()
+	if err != nil {
+		return nil, fmt.Errorf("generating ephemeral key: %w", err)
+	}
+	defer ephemeral.Clear()
+
+	ephemeralRecipient := ephemeral.RecipientString()
+
+	// Compute outer fields.
+	expiresAt := time.Now().Add(remote.TimeoutDuration()).Unix()
+	tagBytes := ComputeTag(innerRecipient)
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+
+	// Build inner stanzas.
+	relayStanzas := make([]RelayStanza, len(stanzas))
 	for i, s := range stanzas {
-		req.Stanzas[i] = RelayStanza{
+		relayStanzas[i] = RelayStanza{
 			Type: s.Type,
 			Args: s.Args,
 			Body: base64.RawStdEncoding.EncodeToString(s.Body),
 		}
+	}
+
+	// Build and encrypt inner payload.
+	inner, err := BuildRequestPayload(1, "unwrap", remote.Stream, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
+	if err != nil {
+		return nil, fmt.Errorf("building inner payload: %w", err)
+	}
+
+	encryptedPayload, err := EncryptPayload(*inner, innerRecipient)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting payload: %w", err)
+	}
+
+	// Build outer request.
+	req := RelayRequest{
+		Version:          1,
+		Action:           "unwrap",
+		Stream:           remote.Stream,
+		IntentID:         intentID,
+		Tag:              tag,
+		ExpiresAt:        expiresAt,
+		EncryptedPayload: encryptedPayload,
 	}
 
 	body, err := json.Marshal(req)
@@ -83,47 +154,29 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	// Ephemeral response encryption (optional, requires hmac_key).
-	var ephemeral *EphemeralKeypair
-	var ephemeralB64 string
-	if remote.EncryptedResponse {
-		ephemeral, err = GenerateEphemeral()
-		if err != nil {
-			return nil, fmt.Errorf("generating ephemeral key: %w", err)
-		}
-		defer ephemeral.Clear()
-		ephemeralB64 = base64.RawStdEncoding.EncodeToString(ephemeral.PublicKey[:])
-		httpReq.Header.Set(EnvelopeHeader, ephemeralB64)
-	}
-
-	// HMAC request signing (optional).
-	hmacKey := remote.HMACKey
-	if hmacKey == "" {
-		hmacKey = os.Getenv("AGE_PLUGIN_RELAY_HMAC_KEY")
-	}
-	if hmacKey != "" {
-		ts, nonce, sig, err := SignRequest([]byte(hmacKey), body, ephemeralB64)
-		if err != nil {
-			return nil, fmt.Errorf("signing request: %w", err)
-		}
-		httpReq.Header.Set(HMACHeaderTimestamp, ts)
-		httpReq.Header.Set(HMACHeaderNonce, nonce)
-		httpReq.Header.Set(HMACHeaderSignature, sig)
-	}
-
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("posting to relay %s: %w", remote.URL, err)
 	}
 	defer resp.Body.Close()
 
-	// Dispatch based on response content type.
+	// 202 Accepted → async flow: switch to polling.
+	if resp.StatusCode == http.StatusAccepted {
+		return pollForResult(client, remote, intentID, token, ephemeral)
+	}
+
+	// 409 Conflict → duplicate intent_id, should not happen with random IDs.
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("broker rejected duplicate intent_id %s", intentID)
+	}
+
+	// Dispatch based on response content type (sync flow).
 	ct := resp.Header.Get("Content-Type")
 	var fileKey []byte
 	if strings.HasPrefix(ct, "text/event-stream") {
-		fileKey, err = readSSEResponse(resp.Body, ephemeral)
+		fileKey, err = readSSEResponse(resp.Body, ephemeral, intentID)
 	} else {
-		fileKey, err = readJSONResponse(resp, ephemeral)
+		fileKey, err = readJSONResponse(resp, ephemeral, intentID)
 	}
 	if err != nil {
 		return nil, err
@@ -131,9 +184,96 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza) ([]byte, error) {
 	return fileKey, nil
 }
 
+// pollForResult polls the broker for the result of an async intent until
+// fulfilled, rejected, unknown (expired), or local timeout.
+func pollForResult(client *http.Client, remote RemoteConfig, intentID, token string, ephemeral *EphemeralKeypair) ([]byte, error) {
+	pollInterval := remote.PollIntervalDuration()
+	deadline := time.Now().Add(remote.TimeoutDuration())
+
+	for {
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("async intent %s timed out waiting for fulfillment", intentID)
+		}
+
+		time.Sleep(pollInterval)
+
+		pollReq := RelayRequest{
+			Version:  1,
+			Action:   "poll",
+			IntentID: intentID,
+		}
+		pollBody, err := json.Marshal(pollReq)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling poll request: %w", err)
+		}
+
+		httpReq, err := http.NewRequest("POST", remote.URL, bytes.NewReader(pollBody))
+		if err != nil {
+			return nil, fmt.Errorf("creating poll request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			// Transient network error — retry.
+			continue
+		}
+
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		// 404 → intent expired or unknown — terminal failure.
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("async intent %s: unknown or expired", intentID)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			// Unexpected status — retry.
+			continue
+		}
+
+		var pollResp asyncPollResponse
+		if err := json.Unmarshal(respBody, &pollResp); err != nil {
+			continue
+		}
+
+		switch pollResp.Status {
+		case "pending":
+			// Keep polling.
+			continue
+		case "fulfilled":
+			if pollResp.Response != nil {
+				var fulfillReq RelayRequest
+				if err := json.Unmarshal(pollResp.Response, &fulfillReq); err != nil {
+					return nil, fmt.Errorf("parsing fulfill response for intent %s: %w", intentID, err)
+				}
+				return extractFileKey(RelayResponse{EncryptedPayload: fulfillReq.EncryptedPayload}, ephemeral, fulfillReq.Version, fulfillReq.Action, intentID)
+			}
+			return nil, fmt.Errorf("async intent %s: fulfilled but no response", intentID)
+		case "rejected":
+			if pollResp.Response != nil {
+				var rejectReq RelayRequest
+				if err := json.Unmarshal(pollResp.Response, &rejectReq); err != nil {
+					return nil, fmt.Errorf("parsing reject response for intent %s: %w", intentID, err)
+				}
+				return nil, verifyReject(rejectReq, ephemeral, intentID)
+			}
+			return nil, fmt.Errorf("async intent %s: rejected but no response", intentID)
+		default:
+			// Unknown status — retry.
+			continue
+		}
+	}
+}
+
 // readJSONResponse handles standard JSON responses (non-streaming).
-// If ephemeral is non-nil, the response may contain encrypted_file_key instead of file_key.
-func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair) ([]byte, error) {
+func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair, intentID string) ([]byte, error) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
 		return nil, fmt.Errorf("reading relay response: %w", err)
@@ -147,49 +287,62 @@ func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair) ([]byte,
 		return nil, fmt.Errorf("relay returned HTTP %d", resp.StatusCode)
 	}
 
-	var relayResp RelayResponse
-	if err := json.Unmarshal(respBody, &relayResp); err != nil {
+	var envelope RelayRequest
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
 		return nil, fmt.Errorf("decoding relay response: %w", err)
 	}
-	if relayResp.Error != "" {
-		return nil, fmt.Errorf("relay error: %s", sanitizeErrorMsg(relayResp.Error))
+
+	// Reject: decrypt and verify outer hash, then return reject error.
+	if envelope.Action == "reject" {
+		return nil, verifyReject(envelope, ephemeral, intentID)
 	}
 
-	return extractFileKey(relayResp, ephemeral)
+	return extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Version, envelope.Action, intentID)
 }
 
-// extractFileKey returns the file key from a RelayResponse, handling both
-// plaintext (file_key) and encrypted (encrypted_file_key) forms.
-func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair) ([]byte, error) {
-	if resp.EncryptedFileKey != "" && ephemeral != nil {
-		return OpenFileKey(resp.EncryptedFileKey, ephemeral.PrivateKey)
+// extractFileKey opens the age-encrypted response, verifies the outer hash,
+// and returns the file key.
+func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, version int, action, intentID string) ([]byte, error) {
+	if resp.EncryptedPayload == "" {
+		return nil, fmt.Errorf("relay response contains no encrypted_payload")
 	}
-	if resp.FileKey == "" {
-		return nil, fmt.Errorf("relay response contains no file key")
-	}
-	fileKey, err := base64.RawStdEncoding.DecodeString(resp.FileKey)
+
+	inner, err := OpenResponse(resp.EncryptedPayload, ephemeral.Identity)
 	if err != nil {
-		return nil, fmt.Errorf("decoding file key: %w", err)
+		return nil, fmt.Errorf("opening sealed response: %w", err)
+	}
+
+	if err := VerifyResponsePayload(inner, version, action, intentID); err != nil {
+		return nil, fmt.Errorf("verifying response payload: %w", err)
+	}
+
+	fileKey, err := base64.RawStdEncoding.DecodeString(inner.FileKey)
+	if err != nil {
+		return nil, fmt.Errorf("decoding file key from response: %w", err)
 	}
 	return fileKey, nil
 }
 
+// verifyReject decrypts a reject envelope's encrypted_payload, verifies the
+// outer hash, and returns a reject error. This ensures the reject is authentic
+// (not forged by a broker or MITM).
+func verifyReject(envelope RelayRequest, ephemeral *EphemeralKeypair, intentID string) error {
+	if envelope.EncryptedPayload == "" {
+		return fmt.Errorf("reject response contains no encrypted_payload")
+	}
+	inner, err := OpenResponse(envelope.EncryptedPayload, ephemeral.Identity)
+	if err != nil {
+		return fmt.Errorf("opening reject payload: %w", err)
+	}
+	if err := VerifyResponsePayload(inner, envelope.Version, "reject", intentID); err != nil {
+		return fmt.Errorf("verifying reject payload: %w", err)
+	}
+	return fmt.Errorf("intent %s: rejected (no matching identity)", intentID)
+}
+
 // readSSEResponse parses a Server-Sent Events stream, looking for a "result"
-// or "error" event. Heartbeat comments and unknown events are ignored.
-//
-// The total bytes read are limited to 1MB to prevent resource exhaustion from
-// a malicious or misbehaving relay server.
-//
-// SSE format (per https://html.spec.whatwg.org/multipage/server-sent-events.html):
-//
-//	event: result
-//	data: {"file_key": "..."}
-//
-//	event: error
-//	data: {"error": "..."}
-//
-//	: heartbeat (comment, ignored)
-func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair) ([]byte, error) {
+// or "error" event.
+func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair, intentID string) ([]byte, error) {
 	const maxSSEBytes = 1 << 20 // 1MB
 	limited := io.LimitReader(r, maxSSEBytes)
 	scanner := bufio.NewScanner(limited)
@@ -208,7 +361,7 @@ func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair) ([]byte, error) {
 		// Empty line = end of event.
 		if line == "" {
 			if eventType != "" && dataBuf.Len() > 0 {
-				result, done, err := handleSSEEvent(eventType, dataBuf.String(), ephemeral)
+				result, done, err := handleSSEEvent(eventType, dataBuf.String(), ephemeral, intentID)
 				if err != nil {
 					return nil, err
 				}
@@ -238,7 +391,7 @@ func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair) ([]byte, error) {
 
 	// Stream ended without a result or error event.
 	if eventType != "" && dataBuf.Len() > 0 {
-		result, _, err := handleSSEEvent(eventType, dataBuf.String(), ephemeral)
+		result, _, err := handleSSEEvent(eventType, dataBuf.String(), ephemeral, intentID)
 		if err != nil {
 			return nil, err
 		}
@@ -251,17 +404,14 @@ func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair) ([]byte, error) {
 }
 
 // handleSSEEvent processes a single SSE event. Returns (fileKey, done, error).
-func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair) ([]byte, bool, error) {
+func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair, intentID string) ([]byte, bool, error) {
 	switch eventType {
 	case "result":
-		var resp RelayResponse
-		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+		var envelope RelayRequest
+		if err := json.Unmarshal([]byte(data), &envelope); err != nil {
 			return nil, false, fmt.Errorf("decoding SSE result: %w", err)
 		}
-		if resp.Error != "" {
-			return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
-		}
-		fileKey, err := extractFileKey(resp, ephemeral)
+		fileKey, err := extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Version, envelope.Action, intentID)
 		if err != nil {
 			return nil, false, fmt.Errorf("extracting file key from SSE: %w", err)
 		}
@@ -274,6 +424,13 @@ func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair) ([]byte
 		}
 		return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
 
+	case "reject":
+		var envelope RelayRequest
+		if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+			return nil, true, fmt.Errorf("relay SSE reject (unparseable)")
+		}
+		return nil, true, verifyReject(envelope, ephemeral, intentID)
+
 	default:
 		// Unknown event type — ignore (forward compat).
 		return nil, false, nil
@@ -281,8 +438,6 @@ func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair) ([]byte
 }
 
 // newHTTPClient builds an HTTP client from a RemoteConfig.
-// Per-remote settings take priority; env vars are used as fallback.
-// Returns an error if configured TLS files cannot be loaded (fail-closed).
 func newHTTPClient(remote RemoteConfig) (*http.Client, error) {
 	timeout := remote.TimeoutDuration()
 	if v := os.Getenv("AGE_PLUGIN_RELAY_TIMEOUT"); v != "" && remote.Timeout == "" {
@@ -336,14 +491,12 @@ func newHTTPClient(remote RemoteConfig) (*http.Client, error) {
 	}, nil
 }
 
-// sanitizeErrorMsg truncates and cleans an error message from the relay server
-// to prevent information leakage or injection via crafted error strings.
+// sanitizeErrorMsg truncates and cleans an error message from the relay server.
 func sanitizeErrorMsg(msg string) string {
 	const maxLen = 256
 	if len(msg) > maxLen {
 		msg = msg[:maxLen] + "..."
 	}
-	// Strip control characters except space/tab/newline.
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 && r != '\t' && r != '\n' {
 			return -1

@@ -29,9 +29,9 @@ type RemoteConfig struct {
 	TLSCA             string `yaml:"tls_ca,omitempty"`             // optional: CA cert for server verification
 	Timeout           string `yaml:"timeout,omitempty"`            // optional: Go duration (default: 5m)
 	Stream            bool   `yaml:"stream,omitempty"`             // optional: use SSE for long-running requests
-	AuthToken         string `yaml:"auth_token,omitempty"`         // optional: Bearer token for relay server auth
-	HMACKey           string `yaml:"hmac_key,omitempty"`           // optional: HMAC-SHA256 shared key for request signing + replay protection
-	EncryptedResponse bool   `yaml:"encrypted_response,omitempty"` // optional: encrypt file key response with ephemeral X25519 (requires hmac_key)
+	AuthToken        string `yaml:"auth_token,omitempty"`        // optional: Bearer token for relay server auth
+	UnwrapRecipient  string `yaml:"unwrap_recipient,omitempty"`  // required: age recipient of the unwrapper (e.g. age1abc...)
+	PollInterval     string `yaml:"poll_interval,omitempty"`     // optional: async polling interval (default: min(timeout/60, 5s))
 }
 
 // TimeoutDuration parses the timeout string, falling back to DefaultTimeout.
@@ -44,6 +44,25 @@ func (r RemoteConfig) TimeoutDuration() time.Duration {
 		return DefaultTimeout
 	}
 	return d
+}
+
+// PollIntervalDuration returns the async polling interval.
+// If not configured, defaults to min(timeout/60, 5s).
+func (r RemoteConfig) PollIntervalDuration() time.Duration {
+	if r.PollInterval != "" {
+		if d, err := time.ParseDuration(r.PollInterval); err == nil {
+			return d
+		}
+	}
+	timeout := r.TimeoutDuration()
+	interval := timeout / 60
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	if interval < 500*time.Millisecond {
+		interval = 500 * time.Millisecond
+	}
+	return interval
 }
 
 // LoadConfig loads the relay config from disk.

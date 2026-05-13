@@ -83,7 +83,11 @@ func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 		return nil, age.ErrIncorrectIdentity
 	}
 
-	fileKey, err := PostToRelay(id.Remote, matched)
+	if id.Remote.UnwrapRecipient == "" {
+		return nil, fmt.Errorf("relay unwrap: unwrap_recipient is required in config (encrypted payload mode)")
+	}
+
+	fileKey, err := PostToRelay(id.Remote, matched, id.Remote.UnwrapRecipient)
 	if err != nil {
 		return nil, fmt.Errorf("relay unwrap: %w", err)
 	}
