@@ -280,7 +280,7 @@ Authorization: Bearer <auth_token>
 5. Compare against `outer_hash` — mismatch = tampered = reject.
 6. Extract `stanzas` and `ephemeral_key`.
 7. `identity.Unwrap(stanzas)` → file key.
-8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("unwrap".intent_id)`.
+8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("fulfill".intent_id)`.
 9. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
 10. Return response.
 
@@ -290,15 +290,20 @@ Authorization: Bearer <auth_token>
 
 ```json
 {
+  "version": 1,
+  "action": "fulfill",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
   "encrypted_payload": "<base64: age-encrypted inner response>"
 }
 ```
+
+The success response uses `action: "fulfill"` — the same `RelayRequest` envelope shape and action as the async flow's operator fulfill body.
 
 **Success (200 OK) — SSE:**
 
 ```
 event: result
-data: {"encrypted_payload": "<age-encrypted blob>"}
+data: {"version":1,"action":"fulfill","intent_id":"a3f1...","encrypted_payload":"<age-encrypted blob>"}
 
 ```
 
@@ -312,12 +317,13 @@ data: {"encrypted_payload": "<age-encrypted blob>"}
 
 ### 4.4. Plugin verification
 
-1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
-2. Parse inner payload.
-3. Recompute `SHA-256("unwrap".intent_id)` from the plugin's own stored intent_id.
-4. Compare against `outer_hash` — mismatch = tamper = fail.
-5. Extract `file_key`.
-6. Discard ephemeral keypair.
+1. Parse the `RelayRequest` envelope — extract `action` and `encrypted_payload`.
+2. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
+3. Parse inner payload.
+4. Recompute `SHA-256("{action}".intent_id)` using the action from the envelope and the plugin's own stored intent_id.
+5. Compare against `outer_hash` — mismatch = tamper = fail.
+6. Extract `file_key`.
+7. Discard ephemeral keypair.
 
 ### 4.5. Sequence Diagram
 
@@ -346,13 +352,16 @@ Plugin                                          Relay-Server
   │                                                  │ 11. age.Encrypt(inner, ephemeral_recipient)
   │                                                  │
   │  200 OK                                          │
-  │  {"encrypted_payload": "<age-encrypted blob>"}   │
+  │  {version:1, action:"fulfill",                   │
+  │   intent_id, encrypted_payload}                  │
   │ ◄──────────────────────────────────────────────  │
   │                                                  │
-  │ 12. age.Decrypt(encrypted_payload, eph_identity) │
-  │ 13. Verify outer_hash == SHA-256("unwrap".intent_id) │
-  │ 14. Extract file_key                             │
-  │ 15. Discard ephemeral keypair                    │
+  │ 12. Parse envelope → extract action,             │
+  │     encrypted_payload                            │
+  │ 13. age.Decrypt(encrypted_payload, eph_identity) │
+  │ 14. Verify outer_hash == SHA-256(action.intent_id) │
+  │ 15. Extract file_key                             │
+  │ 16. Discard ephemeral keypair                    │
   │                                                  │
 ```
 

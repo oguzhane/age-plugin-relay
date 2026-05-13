@@ -198,7 +198,7 @@ func TestPostToRelay5xxError(t *testing.T) {
 
 func TestPostToRelayServerReturnsErrorInJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(RelayResponse{Error: "decrypt failed"})
 	}))
 	defer server.Close()

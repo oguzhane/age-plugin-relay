@@ -270,15 +270,12 @@ func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair, intentID
 		return nil, fmt.Errorf("relay returned HTTP %d", resp.StatusCode)
 	}
 
-	var relayResp RelayResponse
-	if err := json.Unmarshal(respBody, &relayResp); err != nil {
+	var envelope RelayRequest
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
 		return nil, fmt.Errorf("decoding relay response: %w", err)
 	}
-	if relayResp.Error != "" {
-		return nil, fmt.Errorf("relay error: %s", sanitizeErrorMsg(relayResp.Error))
-	}
 
-	return extractFileKey(relayResp, ephemeral, "unwrap", intentID)
+	return extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Action, intentID)
 }
 
 // extractFileKey opens the age-encrypted response, verifies the outer hash,
@@ -371,14 +368,11 @@ func readSSEResponse(r io.Reader, ephemeral *EphemeralKeypair, intentID string) 
 func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair, intentID string) ([]byte, bool, error) {
 	switch eventType {
 	case "result":
-		var resp RelayResponse
-		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+		var envelope RelayRequest
+		if err := json.Unmarshal([]byte(data), &envelope); err != nil {
 			return nil, false, fmt.Errorf("decoding SSE result: %w", err)
 		}
-		if resp.Error != "" {
-			return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
-		}
-		fileKey, err := extractFileKey(resp, ephemeral, "unwrap", intentID)
+		fileKey, err := extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Action, intentID)
 		if err != nil {
 			return nil, false, fmt.Errorf("extracting file key from SSE: %w", err)
 		}

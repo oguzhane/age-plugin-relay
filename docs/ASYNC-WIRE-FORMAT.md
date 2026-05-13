@@ -307,19 +307,20 @@ The `response` field is the **verbatim original** operator reject POST body deli
 
 ## Sync Flow Comparison
 
-In the sync flow (relay-server, not broker), the plugin sends the same `unwrap` request structure directly to the relay-server. The relay-server decrypts, unwraps, and responds immediately:
+In the sync flow (relay-server, not broker), the plugin sends the same `unwrap` request structure directly to the relay-server. The relay-server decrypts, unwraps, and responds immediately with the same `RelayRequest` envelope shape:
 
 ### Sync response — 200 OK (JSON)
 
 ```json
 {
+  "version": 1,
+  "action": "fulfill",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
   "encrypted_payload": "<base64: age-encrypted InnerResponsePayload>"
 }
 ```
 
-The inner response payload is identical in structure but the `outer_hash` uses action `"unwrap"`:
-
-`outer_hash` = `SHA-256("unwrap.<intent_id>")`
+The response uses the same `RelayRequest` envelope as the async flow's operator fulfill body. Both sync and async responses use `action: "fulfill"` and the inner `outer_hash` is `SHA-256("fulfill.<intent_id>")`.
 
 ### Sync response — 200 OK (SSE)
 
@@ -327,7 +328,7 @@ The inner response payload is identical in structure but the `outer_hash` uses a
 : heartbeat
 
 event: result
-data: {"encrypted_payload": "<age-encrypted blob>"}
+data: {"version":1,"action":"fulfill","intent_id":"a3f1...","encrypted_payload":"<age-encrypted blob>"}
 
 ```
 
@@ -432,5 +433,5 @@ type RelayStanza struct {
 | Direction | Formula | Example |
 |---|---|---|
 | Request (plugin → server/operator) | `SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.a3f1...7b8c.QPg24g.1715350800")` |
-| Sync response (server → plugin) | `SHA-256("unwrap.{intent_id}")` | `SHA-256("unwrap.a3f1...7b8c")` |
+| Sync response (server → plugin) | `SHA-256("fulfill.{intent_id}")` | `SHA-256("fulfill.a3f1...7b8c")` |
 | Async response (operator → plugin) | `SHA-256("fulfill.{intent_id}")` | `SHA-256("fulfill.a3f1...7b8c")` |

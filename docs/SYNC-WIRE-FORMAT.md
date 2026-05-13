@@ -96,9 +96,14 @@ The relay-server responds in one of two formats based on the `stream` field in t
 
 ```json
 {
+  "version": 1,
+  "action": "fulfill",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
   "encrypted_payload": "<base64: age-encrypted InnerResponsePayload>"
 }
 ```
+
+The success response uses the same `RelayRequest` envelope shape and `action: "fulfill"` as the async flow's operator fulfill body. This unified format means the plugin always parses the same structure regardless of sync or async mode.
 
 #### Error — 400 Bad Request
 
@@ -199,11 +204,11 @@ SSE is for long-running relay scenarios (approval flows, remote YubiKey touch). 
 
 ```
 event: result
-data: {"encrypted_payload":"<base64: age-encrypted InnerResponsePayload>"}
+data: {"version":1,"action":"fulfill","intent_id":"a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c","encrypted_payload":"<base64: age-encrypted InnerResponsePayload>"}
 
 ```
 
-The `data` field is a JSON-serialized `RelayResponse`.
+The `data` field is a JSON-serialized `RelayRequest` envelope (same shape as the JSON success response).
 
 #### Error event
 
@@ -234,7 +239,7 @@ The plugin reads the stream line by line:
 2. `event: <type>` → sets the event type
 3. `data: <json>` → accumulates event data
 4. Empty line → dispatches the event:
-   - `event: result` → parse `RelayResponse`, extract file key
+   - `event: result` → parse `RelayRequest` envelope, extract file key
    - `event: error` → parse `RelayResponse`, return error
    - Unknown event type → ignored (forward compatibility)
 5. Stream ends without result/error → error
@@ -262,13 +267,13 @@ Encrypted with `age.Encrypt` to the plugin's ephemeral recipient (`ephemeral_key
 **Outer hash computation:**
 
 ```
-SHA-256("unwrap.{intent_id}")
+SHA-256("fulfill.{intent_id}")
 ```
 
 Example:
 
 ```
-SHA-256("unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
+SHA-256("fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 ```
 
 ---
@@ -277,12 +282,13 @@ SHA-256("unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 
 After receiving the response (JSON or SSE `result` event):
 
-1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response JSON.
-2. Parse `InnerResponsePayload`.
-3. Recompute `SHA-256("unwrap." + intent_id)` using the plugin's own stored `intent_id`.
-4. Compare against `outer_hash` — mismatch = tamper = fail.
-5. Base64-decode `file_key` → 16-byte age file key.
-6. Discard ephemeral keypair.
+1. Parse the `RelayRequest` envelope — extract `action` and `encrypted_payload`.
+2. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response JSON.
+3. Parse `InnerResponsePayload`.
+4. Recompute `SHA-256("{action}." + intent_id)` using the action from the envelope and the plugin's own stored `intent_id`.
+5. Compare against `outer_hash` — mismatch = tamper = fail.
+6. Base64-decode `file_key` → 16-byte age file key.
+7. Discard ephemeral keypair.
 
 ---
 
@@ -300,9 +306,9 @@ After receiving the request:
 8. Compare against `outer_hash` — mismatch = reject.
 9. Decode stanzas from inner payload.
 10. Try each local identity: `identity.Unwrap(stanzas)` → file key.
-11. Build `InnerResponsePayload`: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("unwrap." + intent_id)`.
+11. Build `InnerResponsePayload`: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("fulfill." + intent_id)`.
 12. `age.Encrypt(inner_response, ephemeral_key)` → sealed `encrypted_payload`.
-13. Return `RelayResponse` as JSON or SSE `result` event.
+13. Return `RelayRequest` envelope as JSON or SSE `result` event.
 
 ---
 
@@ -340,7 +346,22 @@ type RelayRequest struct {
 }
 ```
 
-Response (relay-server returns):
+Response (relay-server returns on success — same `RelayRequest` envelope):
+
+```go
+// relay/client.go — success uses RelayRequest shape
+type RelayRequest struct {
+    Version          int    `json:"version"`
+    Action           string `json:"action"`
+    Stream           bool   `json:"stream,omitempty"`
+    IntentID         string `json:"intent_id,omitempty"`
+    Tag              string `json:"tag,omitempty"`
+    ExpiresAt        int64  `json:"expires_at,omitempty"`
+    EncryptedPayload string `json:"encrypted_payload,omitempty"`
+}
+```
+
+Response (relay-server returns on error):
 
 ```go
 // relay/client.go
@@ -387,4 +408,4 @@ type InnerResponsePayload struct {
 | Direction | Formula | Example |
 |---|---|---|
 | Request (plugin → server) | `SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.a3f1...7b8c.QPg24g.1715350800")` |
-| Response (server → plugin) | `SHA-256("unwrap.{intent_id}")` | `SHA-256("unwrap.a3f1...7b8c")` |
+| Response (server → plugin) | `SHA-256("{action}.{intent_id}")` | `SHA-256("fulfill.a3f1...7b8c")` |

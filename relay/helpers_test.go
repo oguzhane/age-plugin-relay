@@ -59,10 +59,10 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		}
 
 		// Build and seal response.
-		respInner, _ := BuildResponsePayload("unwrap", req.IntentID, fileKey)
+		respInner, _ := BuildResponsePayload("fulfill", req.IntentID, fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
-		resp := RelayResponse{EncryptedPayload: sealed}
+		resp := RelayRequest{Version: 1, Action: "fulfill", IntentID: req.IntentID, EncryptedPayload: sealed}
 		if req.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
