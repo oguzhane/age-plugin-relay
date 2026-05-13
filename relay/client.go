@@ -3,6 +3,7 @@ package relay
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -174,7 +175,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 
 	// 202 Accepted → async flow: switch to polling.
 	if resp.StatusCode == http.StatusAccepted {
-		return pollForResult(client, remote, intentID, token, ephemeral)
+		return pollForResult(client, remote, intentID, token, ephemeral, claimPriv)
 	}
 
 	// 409 Conflict → duplicate intent_id, should not happen with random IDs.
@@ -198,7 +199,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 
 // pollForResult polls the broker for the result of an async intent until
 // fulfilled, rejected, unknown (expired), or local timeout.
-func pollForResult(client *http.Client, remote RemoteConfig, intentID, token string, ephemeral *EphemeralKeypair) ([]byte, error) {
+func pollForResult(client *http.Client, remote RemoteConfig, intentID, token string, ephemeral *EphemeralKeypair, claimPriv ed25519.PrivateKey) ([]byte, error) {
 	pollInterval := remote.PollIntervalDuration()
 	deadline := time.Now().Add(remote.TimeoutDuration())
 
@@ -210,9 +211,10 @@ func pollForResult(client *http.Client, remote RemoteConfig, intentID, token str
 		time.Sleep(pollInterval)
 
 		pollReq := RelayRequest{
-			Version:  1,
-			Action:   "poll",
-			IntentID: intentID,
+			Version:        1,
+			Action:         "poll",
+			IntentID:       intentID,
+			IntentClaimSig: SignIntentClaim(claimPriv, 1, "poll", intentID, ""),
 		}
 		pollBody, err := json.Marshal(pollReq)
 		if err != nil {

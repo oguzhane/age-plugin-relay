@@ -532,11 +532,14 @@ The `encrypted_payload` contains the inner response payload (§3.4) age-encrypte
 
 ### 5.7. Poll (plugin → broker)
 
+Poll requests are authenticated with `intent_claim_sig` — proving the caller is the intent creator.
+
 ```json
 {
   "version": 1,
   "action": "poll",
-  "intent_id": "a3f1..."
+  "intent_id": "a3f1...",
+  "intent_claim_sig": "<base64: Ed25519 sig over '1.poll.{intent_id}.{SHA-256(\"\")}'>"
 }
 ```
 
@@ -545,6 +548,8 @@ The `encrypted_payload` contains the inner response payload (§3.4) age-encrypte
 | `200 OK` | `{"status":"pending"}` | Keep polling |
 | `200 OK` | `{"status":"fulfilled", "response": {...}}` | Plugin extracts `encrypted_payload` from response, decrypts with ephemeral identity, verifies outer_hash |
 | `200 OK` | `{"status":"rejected", "response": {...}}` | Operator declined; `response` contains verbatim operator reject body; plugin returns failure |
+| `400` | `{"error":"missing intent_claim_sig"}` | Poll request missing required signature |
+| `403` | `{"error":"invalid_claim_sig"}` | Signature verification failed — caller is not the intent creator |
 | `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
 
 The broker does not distinguish "expired" from "never existed." Both collapse to `404`.

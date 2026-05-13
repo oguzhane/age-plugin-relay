@@ -293,7 +293,8 @@ The `outer_hash` covers every response envelope field outside `encrypted_payload
 {
   "version": 1,
   "action": "poll",
-  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c"
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+  "intent_claim_sig": "<base64: Ed25519 signature over '1.poll.{intent_id}.{SHA-256(\"\")}'>"
 }
 ```
 
@@ -302,6 +303,19 @@ The `outer_hash` covers every response envelope field outside `encrypted_payload
 | `version` | int | Always `1` |
 | `action` | string | `"poll"` |
 | `intent_id` | string | The intent to check |
+| `intent_claim_sig` | string | **Required.** Ed25519 signature proving the caller is the intent creator. Canonical: `"{version}.poll.{intent_id}.{SHA-256("")}"` |
+
+### Response — 400 Bad Request (missing sig)
+
+```json
+{"error": "missing intent_claim_sig"}
+```
+
+### Response — 403 Forbidden (invalid sig)
+
+```json
+{"error": "invalid_claim_sig"}
+```
 
 ### Response — 200 OK (pending)
 

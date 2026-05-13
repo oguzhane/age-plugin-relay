@@ -64,10 +64,40 @@ func (q *Queue) Submit(intentID, tag string, requestBody []byte, intentClaimPub 
 
 // Poll returns the current state of an intent. Returns nil if the intent
 // does not exist (expired or never created — collapsed to 404).
+// Deprecated: Use PollWithClaim for authenticated polling.
 func (q *Queue) Poll(intentID string) *PollResponse {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	return q.pollLocked(intentID)
+}
+
+// PollWithClaim returns the current state of an intent after verifying the
+// caller's intent claim signature. Returns an error if the intent doesn't exist,
+// is expired, or the signature is invalid.
+func (q *Queue) PollWithClaim(intentID, intentClaimSig string, version int) (*PollResponse, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	intent, ok := q.intents[intentID]
+	if !ok {
+		return nil, fmt.Errorf("unknown_intent")
+	}
+
+	if time.Since(intent.CreatedAt) > q.maxTTL {
+		delete(q.intents, intentID)
+		return nil, fmt.Errorf("unknown_intent")
+	}
+
+	if err := relay.VerifyIntentClaim(intent.IntentClaimPub, intentClaimSig, version, "poll", intentID, ""); err != nil {
+		return nil, err
+	}
+
+	return q.pollLocked(intentID), nil
+}
+
+// pollLocked returns the poll response for an intent. Must be called with q.mu held.
+func (q *Queue) pollLocked(intentID string) *PollResponse {
 	intent, ok := q.intents[intentID]
 	if !ok {
 		return nil

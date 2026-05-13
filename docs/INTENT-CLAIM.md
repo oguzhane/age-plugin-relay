@@ -85,6 +85,16 @@ sig := relay.SignIntentClaim(claimPriv, version, action, intentID, encryptedPayl
 
 The signature is sent as `intent_claim_sig` in the fulfill/reject request.
 
+### 3b. Plugin signs poll requests
+
+The plugin also signs poll requests using the private key it generated at submit time:
+
+```go
+sig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+```
+
+The `encrypted_payload` is empty for poll (poll carries no payload), so the canonical string is `"1.poll.{intent_id}.{SHA-256("")}"`.
+
 ### 4. Broker verifies signature
 
 ```go
@@ -112,7 +122,7 @@ The signature covers a deterministic canonical string that binds the signature t
 | Component | Description |
 |-----------|-------------|
 | `version` | Protocol version (decimal string, e.g., `"1"`) |
-| `action` | The action being signed (`"fulfill"` or `"reject"`) |
+| `action` | The action being signed (`"poll"`, `"fulfill"`, or `"reject"`) |
 | `intent_id` | The intent being acted on |
 | `SHA-256(encrypted_payload)` | Hex-encoded SHA-256 of the `encrypted_payload` field value |
 
@@ -155,7 +165,7 @@ This ensures the broker cannot substitute a different public key without detecti
 | HTTP Status | Error | Condition |
 |-------------|-------|-----------|
 | 400 Bad Request | `missing intent_claim_pub` | `unwrap` without `intent_claim_pub` |
-| 400 Bad Request | `missing intent_claim_sig` | `fulfill`/`reject` without `intent_claim_sig` |
+| 400 Bad Request | `missing intent_claim_sig` | `poll`/`fulfill`/`reject` without `intent_claim_sig` |
 | 403 Forbidden | `invalid_claim_sig` | Signature verification failed |
 
 ## Sync Flow Note

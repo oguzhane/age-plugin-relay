@@ -150,15 +150,28 @@ func handleUnwrap(w http.ResponseWriter, body []byte, req *relay.RelayRequest, q
 }
 
 // handlePoll returns the current state of an intent to the plugin.
+// Requires intent_claim_sig for authentication.
 func handlePoll(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Queue) {
 	if req.IntentID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
 	}
+	if req.IntentClaimSig == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_sig"})
+		return
+	}
 
-	resp := q.Poll(req.IntentID)
-	if resp == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
+	resp, err := q.PollWithClaim(req.IntentID, req.IntentClaimSig, req.Version)
+	if err != nil {
+		errMsg := err.Error()
+		switch errMsg {
+		case "unknown_intent":
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": errMsg})
+		case "invalid_claim_sig":
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": errMsg})
+		default:
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": errMsg})
+		}
 		return
 	}
 

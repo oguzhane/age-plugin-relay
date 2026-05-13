@@ -56,9 +56,18 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(broker.AsyncAccepted{})
 
 	case "poll":
-		resp := b.queue.Poll(req.IntentID)
-		if resp == nil {
-			writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
+		if req.IntentClaimSig == "" {
+			writeAsyncTestJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_sig"})
+			return
+		}
+		resp, err := b.queue.PollWithClaim(req.IntentID, req.IntentClaimSig, req.Version)
+		if err != nil {
+			errMsg := err.Error()
+			if errMsg == "unknown_intent" {
+				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": errMsg})
+			} else {
+				writeAsyncTestJSON(w, http.StatusForbidden, map[string]string{"error": errMsg})
+			}
 			return
 		}
 		writeAsyncTestJSON(w, http.StatusOK, resp)
@@ -270,8 +279,9 @@ func TestAsyncEndToEnd(t *testing.T) {
 	}
 	t.Log("Operator fulfilled")
 
-	// Plugin polls.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	// Plugin polls (authenticated with intent claim sig).
+	pollClaimSig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID, IntentClaimSig: pollClaimSig}
 	pollBody, _ := json.Marshal(pollReq)
 	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
 	pollHTTP.Header.Set("Content-Type", "application/json")
@@ -354,8 +364,9 @@ func TestAsyncRejectionFlow(t *testing.T) {
 		t.Fatalf("expected 200 on reject, got %d", rejectResp.StatusCode)
 	}
 
-	// Plugin polls and sees rejected.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	// Plugin polls and sees rejected (authenticated with intent claim sig).
+	pollClaimSig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID, IntentClaimSig: pollClaimSig}
 	pollBody, _ := json.Marshal(pollReq)
 	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
 	pollHTTP.Header.Set("Content-Type", "application/json")
@@ -420,7 +431,10 @@ func TestAsyncPollUnknownReturns404(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	req := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "nonexistent"}
+	// Generate a dummy claim keypair to sign the poll (intent doesn't exist, so sig won't match anything).
+	_, dummyPriv, _ := relay.GenerateIntentClaim()
+	dummySig := relay.SignIntentClaim(dummyPriv, 1, "poll", "nonexistent", "")
+	req := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "nonexistent", IntentClaimSig: dummySig}
 	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -485,7 +499,7 @@ func TestAsyncPollAfterExpiry(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	claimPub, _, err := relay.GenerateIntentClaim()
+	claimPub, claimPriv, err := relay.GenerateIntentClaim()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +514,8 @@ func TestAsyncPollAfterExpiry(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	poll := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "expire-test"}
+	pollSig := relay.SignIntentClaim(claimPriv, 1, "poll", "expire-test", "")
+	poll := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "expire-test", IntentClaimSig: pollSig}
 	pb, _ := json.Marshal(poll)
 	pr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pb))
 	pr.Header.Set("Content-Type", "application/json")
@@ -845,8 +860,9 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	fResp, _ := http.DefaultClient.Do(fh)
 	fResp.Body.Close()
 
-	// Poll to get the stored sealed payload.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	// Poll to get the stored sealed payload (authenticated with intent claim sig).
+	pollClaimSig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID, IntentClaimSig: pollClaimSig}
 	pollBody, _ := json.Marshal(pollReq)
 	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
 	pollHTTP.Header.Set("Content-Type", "application/json")
