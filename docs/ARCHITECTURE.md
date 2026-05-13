@@ -404,7 +404,7 @@ Plugin                                          Relay-Server
 
 ---
 
-## 5. Async Flow (Control Tower)
+## 5. Async Flow (Broker)
 
 Three actors: **Plugin**, **Broker**, and **Operator**. The broker is a zero-trust stateful queue — it stores and forwards opaque encrypted payloads. It holds no age identity, no key material, and no view into the cryptographic content. The operator is a separate process that polls the broker, decrypts, unwraps, and fulfills.
 
@@ -954,7 +954,7 @@ age-plugin-relay/
 │   ├── config_test.go                 # Config tests (LoadConfig, LookupRemote, timeout, poll interval)
 │   ├── payload_test.go                # Encrypted payload tests (outer hash, encrypt/decrypt, verify, tamper detection)
 │   ├── envelope_test.go               # Envelope seal/open unit tests (age encryption)
-│   ├── async_test.go                  # Async (Control Tower) tests (broker protocol, E2E)
+│   ├── async_test.go                  # Async (broker) tests (broker protocol, E2E)
 │   ├── integration_test.go            # Integration tests (age.Encrypt/Decrypt E2E, broker blindness, tampering)
 │   └── e2e_test.go                    # E2E tests (real binaries, full user flow)
 ├── cmd/
@@ -1117,7 +1117,7 @@ go test -v ./relay/broker/
 | `TestSweepCleansExpiredIntents` | Background sweep removes expired intents, IDs freed for reuse |
 | `TestMultipleTagsIsolation` | Different tags are fully isolated |
 
-### Async (Control Tower) tests
+### Async (broker) tests
 
 ```bash
 go test -v ./relay/ -run TestAsync

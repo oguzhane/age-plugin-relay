@@ -1,4 +1,4 @@
-# Async (Control Tower) Wire Format Reference
+# Async Wire Format Reference
 
 Complete HTTP request/response bodies for the async flow. All interactions use `POST` with `Content-Type: application/json`. Every request body is a `RelayRequest` (same Go struct, different fields populated per action).
 

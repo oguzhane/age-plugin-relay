@@ -74,8 +74,8 @@ type RelayResponse struct {
 // The innerRecipient is the age recipient string of the unwrapper (operator/server).
 // All payloads are encrypted — the broker sees only opaque blobs.
 //
-// If the server responds with 202 Accepted, the client switches to async polling
-// (Control Tower flow): it polls with the intent_id until the intent is fulfilled,
+// If the server responds with 202 Accepted, the client switches to async polling:
+// it polls with the intent_id until the intent is fulfilled,
 // rejected, or the local timeout elapses.
 func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient string) ([]byte, error) {
 	intentID, err := GenerateIntentID()

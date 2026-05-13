@@ -165,7 +165,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete technical refe
 
 - Wire protocol and encrypted payload format
 - Data model (recipient, identity, stanza formats)
-- Sync and async (Control Tower) flows
+- Sync and async (broker) flows
 - Security model and threat analysis
 - Relay server, broker, and operator configuration
 - Code architecture and test matrix
