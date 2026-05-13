@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/oguzhane/age-plugin-relay/relay"
 )
 
 // Queue is a thread-safe in-memory intent queue with TTL-based expiry.
@@ -76,8 +74,8 @@ func (q *Queue) Poll(intentID string) *PollResponse {
 	resp := &PollResponse{
 		Status: string(intent.Status),
 	}
-	if intent.Status == StatusFulfilled {
-		resp.EncryptedPayload = intent.EncryptedPayload
+	if intent.Status == StatusFulfilled || intent.Status == StatusRejected {
+		resp.Response = json.RawMessage(intent.Response)
 	}
 	return resp
 }
@@ -104,24 +102,25 @@ func (q *Queue) Pull(tag string) *PullResponse {
 			continue
 		}
 
-		var req relay.RelayRequest
-		if err := json.Unmarshal(intent.Request, &req); err != nil {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(intent.Request, &parsed); err != nil {
 			// Skip malformed stored requests (should not happen).
 			continue
 		}
 
 		resp.Intents = append(resp.Intents, PullIntent{
 			IntentID: intent.IntentID,
-			Request:  req,
+			Request:  json.RawMessage(intent.Request),
 		})
 	}
 
 	return resp
 }
 
-// Fulfill marks an intent as fulfilled with the operator's encrypted payload.
+// Fulfill marks an intent as fulfilled with the operator's response body.
+// The responseBody is stored verbatim and returned to the plugin on poll.
 // Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Fulfill(intentID, encryptedPayload string) error {
+func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -140,13 +139,14 @@ func (q *Queue) Fulfill(intentID, encryptedPayload string) error {
 	}
 
 	intent.Status = StatusFulfilled
-	intent.EncryptedPayload = encryptedPayload
+	intent.Response = responseBody
 	return nil
 }
 
-// Reject marks an intent as rejected.
+// Reject marks an intent as rejected with the operator's response body.
+// The responseBody is stored verbatim and returned to the plugin on poll.
 // Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Reject(intentID string) error {
+func (q *Queue) Reject(intentID string, responseBody []byte) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -165,6 +165,7 @@ func (q *Queue) Reject(intentID string) error {
 	}
 
 	intent.Status = StatusRejected
+	intent.Response = responseBody
 	return nil
 }
 

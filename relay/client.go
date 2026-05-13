@@ -31,9 +31,9 @@ func GenerateIntentID() (string, error) {
 
 // asyncPollResponse is the broker's response to a poll action.
 type asyncPollResponse struct {
-	Status           string `json:"status"`
-	EncryptedPayload string `json:"encrypted_payload,omitempty"`
-	Error            string `json:"error,omitempty"`
+	Status   string          `json:"status"`
+	Response json.RawMessage `json:"response,omitempty"`
+	Error    string          `json:"error,omitempty"`
 }
 
 // RelayRequest is the JSON body sent to the relay endpoint.
@@ -238,10 +238,14 @@ func pollForResult(client *http.Client, remote RemoteConfig, intentID, token str
 			// Keep polling.
 			continue
 		case "fulfilled":
-			if pollResp.EncryptedPayload != "" {
-				return extractFileKey(RelayResponse{EncryptedPayload: pollResp.EncryptedPayload}, ephemeral, "fulfill", intentID)
+			if pollResp.Response != nil {
+				var fulfillReq RelayRequest
+				if err := json.Unmarshal(pollResp.Response, &fulfillReq); err != nil {
+					return nil, fmt.Errorf("parsing fulfill response for intent %s: %w", intentID, err)
+				}
+				return extractFileKey(RelayResponse{EncryptedPayload: fulfillReq.EncryptedPayload}, ephemeral, fulfillReq.Action, intentID)
 			}
-			return nil, fmt.Errorf("async intent %s: fulfilled but no encrypted_payload", intentID)
+			return nil, fmt.Errorf("async intent %s: fulfilled but no response", intentID)
 		case "rejected":
 			return nil, fmt.Errorf("async intent %s: rejected by operator", intentID)
 		default:

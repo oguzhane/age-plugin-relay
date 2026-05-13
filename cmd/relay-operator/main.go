@@ -104,20 +104,27 @@ func main() {
 		for _, intent := range pullResp.Intents {
 			fmt.Fprintf(os.Stderr, "[relay-operator] Processing intent %s\n", intent.IntentID)
 
+			// 0. Unmarshal the verbatim request from the broker.
+			var req relay.RelayRequest
+			if err := json.Unmarshal(intent.Request, &req); err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Malformed request — skipping\n")
+				continue
+			}
+
 			// 1. Decrypt the encrypted payload.
-			if intent.Request.EncryptedPayload == "" {
+			if req.EncryptedPayload == "" {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   No encrypted_payload — skipping\n")
 				continue
 			}
 
-			inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, identities)
+			inner, err := relay.DecryptPayload(req.EncryptedPayload, identities)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Decrypt failed: %v — skipping\n", err)
 				continue
 			}
 
 			// 2. Verify outer hash and expiry.
-			if err := relay.VerifyRequestPayload(inner, intent.Request.Version, intent.Request.Action, intent.Request.IntentID, intent.Request.Tag, intent.Request.ExpiresAt); err != nil {
+			if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
 				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)

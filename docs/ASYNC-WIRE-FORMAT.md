@@ -118,7 +118,7 @@ Three actors: **Plugin**, **Broker**, **Operator**.
 }
 ```
 
-The `request` field is the **verbatim original** `RelayRequest` the plugin submitted. The broker stores the raw bytes and deserializes them back. The `intent_id` appears both at the top level (for convenience) and inside `request`.
+The `request` field is the **verbatim original** plugin POST body delivered as raw JSON. The broker stores the raw bytes and passes them through without parsing or restructuring. The `intent_id` appears both at the top level (for convenience) and inside `request`.
 
 If no pending intents match the tag:
 
@@ -269,19 +269,31 @@ If no pending intents match the tag:
 ```json
 {
   "status": "fulfilled",
-  "encrypted_payload": "<base64: age-encrypted InnerResponsePayload>"
+  "response": {
+    "version": 1,
+    "action": "fulfill",
+    "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+    "encrypted_payload": "<base64: age-encrypted InnerResponsePayload>"
+  }
 }
 ```
 
-The `encrypted_payload` is the exact blob the operator submitted in the fulfill request.
+The `response` field is the **verbatim original** operator fulfill POST body delivered as raw JSON. The broker stores the raw bytes and passes them through without parsing or restructuring.
 
 ### Response — 200 OK (rejected)
 
 ```json
 {
-  "status": "rejected"
+  "status": "rejected",
+  "response": {
+    "version": 1,
+    "action": "reject",
+    "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c"
+  }
 }
 ```
+
+The `response` field is the **verbatim original** operator reject POST body delivered as raw JSON.
 
 ### Response — 404 Not Found (expired or unknown)
 
@@ -357,13 +369,13 @@ type PullResponse struct {
 }
 
 type PullIntent struct {
-    IntentID string       `json:"intent_id"`
-    Request  RelayRequest `json:"request"`            // verbatim original plugin request
+    IntentID string          `json:"intent_id"`
+    Request  json.RawMessage `json:"request"`            // verbatim plugin POST body
 }
 
 type PollResponse struct {
-    Status           string `json:"status"`            // "pending" | "fulfilled" | "rejected"
-    EncryptedPayload string `json:"encrypted_payload,omitempty"`
+    Status   string          `json:"status"`             // "pending" | "fulfilled" | "rejected"
+    Response json.RawMessage `json:"response,omitempty"` // verbatim operator fulfill POST body
 }
 ```
 
@@ -372,9 +384,9 @@ Plugin-side poll response (mirrors broker's `PollResponse` with an extra `error`
 ```go
 // relay/client.go
 type asyncPollResponse struct {
-    Status           string `json:"status"`
-    EncryptedPayload string `json:"encrypted_payload,omitempty"`
-    Error            string `json:"error,omitempty"`
+    Status   string          `json:"status"`
+    Response json.RawMessage `json:"response,omitempty"`
+    Error    string          `json:"error,omitempty"`
 }
 ```
 

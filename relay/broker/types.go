@@ -7,9 +7,8 @@
 package broker
 
 import (
+	"encoding/json"
 	"time"
-
-	"github.com/oguzhane/age-plugin-relay/relay"
 )
 
 // Status represents the lifecycle state of an intent.
@@ -36,9 +35,9 @@ type Intent struct {
 	// Status is the current lifecycle state.
 	Status Status
 
-	// EncryptedPayload is set when the operator fulfills the intent.
-	// Opaque to the broker — age-encrypted to the plugin's ephemeral recipient.
-	EncryptedPayload string
+	// Response is the operator's raw fulfill POST body, stored verbatim.
+	// Opaque to the broker — contains the age-encrypted response for the plugin.
+	Response []byte
 
 	// CreatedAt is when the broker received the intent. Used for TTL enforcement.
 	CreatedAt time.Time
@@ -46,8 +45,8 @@ type Intent struct {
 
 // PullIntent is a single intent as returned to the operator on a pull request.
 type PullIntent struct {
-	IntentID string             `json:"intent_id"`
-	Request  relay.RelayRequest `json:"request"`
+	IntentID string          `json:"intent_id"`
+	Request  json.RawMessage `json:"request"` // verbatim plugin request bytes
 }
 
 // PullResponse is the broker's response to an operator pull request.
@@ -57,8 +56,8 @@ type PullResponse struct {
 
 // PollResponse is the broker's response to a plugin poll request.
 type PollResponse struct {
-	Status           string `json:"status"`
-	EncryptedPayload string `json:"encrypted_payload,omitempty"`
+	Status   string          `json:"status"`
+	Response json.RawMessage `json:"response,omitempty"` // verbatim operator fulfill bytes
 }
 
 // AsyncAccepted is the broker's 202 response to a plugin unwrap request

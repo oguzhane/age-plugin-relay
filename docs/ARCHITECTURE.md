@@ -428,7 +428,7 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
 }
 ```
 
-The response contains **no broker-asserted metadata** — no `created_at`, no broker timestamps.
+The response contains **no broker-asserted metadata** — no `created_at`, no broker timestamps. The `request` field is the **verbatim original** plugin POST body delivered as raw JSON (`json.RawMessage`). The broker stores the raw bytes and passes them through without parsing or restructuring.
 
 ### 5.4. Operator Processing
 
@@ -484,8 +484,8 @@ The `encrypted_payload` contains the inner response payload (§3.4) age-encrypte
 | Status | Body | Meaning |
 |---|---|---|
 | `200 OK` | `{"status":"pending"}` | Keep polling |
-| `200 OK` | `{"status":"fulfilled", "encrypted_payload": "..."}` | Plugin decrypts with its ephemeral identity, verifies outer_hash |
-| `200 OK` | `{"status":"rejected"}` | Operator declined; plugin returns failure |
+| `200 OK` | `{"status":"fulfilled", "response": {...}}` | Plugin extracts `encrypted_payload` from response, decrypts with ephemeral identity, verifies outer_hash |
+| `200 OK` | `{"status":"rejected", "response": {...}}` | Operator declined; `response` contains verbatim operator reject body; plugin returns failure |
 | `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
 
 The broker does not distinguish "expired" from "never existed." Both collapse to `404`.
@@ -494,12 +494,13 @@ The broker does not distinguish "expired" from "never existed." Both collapse to
 
 On receiving a `fulfilled` poll response:
 
-1. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
-2. Parse inner payload.
-3. Recompute `SHA-256("fulfill".intent_id)` from the plugin's own stored intent_id.
-4. Compare against `outer_hash` — mismatch = tamper = fail.
-5. Extract `file_key`.
-6. Discard ephemeral keypair.
+1. Parse `response` field (verbatim operator fulfill body) → extract `encrypted_payload`.
+2. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
+3. Parse inner payload.
+4. Recompute `SHA-256("fulfill".intent_id)` from the plugin's own stored intent_id.
+5. Compare against `outer_hash` — mismatch = tamper = fail.
+6. Extract `file_key`.
+7. Discard ephemeral keypair.
 
 ### 5.9. State Machine
 
@@ -557,9 +558,8 @@ Plugin                          Broker                          Operator
   │                               │                                │
   │                               │  200 OK                        │
   │                               │  {intents: [{intent_id,        │
-  │                               │    request: {version, action,  │
-  │                               │    intent_id, tag, expires_at, │
-  │                               │    encrypted_payload}}]}       │
+  │                               │    request: <verbatim plugin   │
+  │                               │    POST body as raw JSON>}]}   │
   │                               │ ──────────────────────────────►│
   │                               │                                │
   │                               │                5. age.Decrypt(encrypted_payload, identity)
@@ -576,8 +576,8 @@ Plugin                          Broker                          Operator
   │                               │   encrypted_payload}           │
   │                               │ ◄──────────────────────────────│
   │                               │                                │
-  │                               │  12. Store encrypted_payload   │
-  │                               │      on intent (opaque)        │
+  │                               │  12. Store verbatim fulfill    │
+  │                               │      body on intent (opaque)   │
   │                               │                                │
   │                               │  200 OK                        │
   │                               │ ──────────────────────────────►│
@@ -588,17 +588,20 @@ Plugin                          Broker                          Operator
   │                               │                                │
   │  200 OK                       │                                │
   │  {status:"fulfilled",         │                                │
-  │   encrypted_payload}          │                                │
+  │   response: <verbatim         │                                │
+  │   operator fulfill body>}     │                                │
   │ ◄─────────────────────────────│                                │
   │                               │                                │
-  │ 13. age.Decrypt(             │                                │
+  │ 13. Parse response →          │                                │
+  │     extract encrypted_payload │                                │
+  │ 14. age.Decrypt(             │                                │
   │     encrypted_payload,        │                                │
   │     eph_identity)             │                                │
-  │ 14. Verify outer_hash         │                                │
+  │ 15. Verify outer_hash         │                                │
   │     == SHA-256("fulfill"     │                                │
   │       .intent_id)            │                                │
-  │ 15. Extract file_key          │                                │
-  │ 16. Discard ephemeral keypair │                                │
+  │ 16. Extract file_key          │                                │
+  │ 17. Discard ephemeral keypair │                                │
   │                               │                                │
 ```
 

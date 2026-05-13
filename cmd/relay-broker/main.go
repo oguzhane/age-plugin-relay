@@ -102,9 +102,9 @@ func main() {
 		case "pull":
 			handlePull(w, &req, queue)
 		case "fulfill":
-			handleFulfill(w, &req, queue)
+			handleFulfill(w, body, &req, queue)
 		case "reject":
-			handleReject(w, &req, queue)
+			handleReject(w, body, &req, queue)
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported action: " + req.Action})
 		}
@@ -169,8 +169,8 @@ func handlePull(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Queue)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleFulfill marks an intent as fulfilled with the operator's encrypted payload.
-func handleFulfill(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Queue) {
+// handleFulfill marks an intent as fulfilled with the operator's response body.
+func handleFulfill(w http.ResponseWriter, body []byte, req *relay.RelayRequest, q *broker.Queue) {
 	if req.IntentID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
@@ -180,7 +180,7 @@ func handleFulfill(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Que
 		return
 	}
 
-	if err := q.Fulfill(req.IntentID, req.EncryptedPayload); err != nil {
+	if err := q.Fulfill(req.IntentID, body); err != nil {
 		switch err.Error() {
 		case "unknown_intent":
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
@@ -197,13 +197,13 @@ func handleFulfill(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Que
 }
 
 // handleReject marks an intent as rejected.
-func handleReject(w http.ResponseWriter, req *relay.RelayRequest, q *broker.Queue) {
+func handleReject(w http.ResponseWriter, body []byte, req *relay.RelayRequest, q *broker.Queue) {
 	if req.IntentID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
 	}
 
-	if err := q.Reject(req.IntentID); err != nil {
+	if err := q.Reject(req.IntentID, body); err != nil {
 		switch err.Error() {
 		case "unknown_intent":
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})

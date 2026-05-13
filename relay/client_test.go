@@ -382,9 +382,16 @@ func TestEncryptedPayloadAsyncE2E(t *testing.T) {
 
 		case "poll":
 			if fulfilled && req.IntentID == storedReq.IntentID {
+				// Return the full operator fulfill body as verbatim "response".
+				fulfillBody := RelayRequest{
+					Version:          1,
+					Action:           "fulfill",
+					IntentID:         storedReq.IntentID,
+					EncryptedPayload: fulfillPayload,
+				}
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"status":            "fulfilled",
-					"encrypted_payload": fulfillPayload,
+					"status":   "fulfilled",
+					"response": fulfillBody,
 				})
 			} else if storedReq != nil && req.IntentID == storedReq.IntentID {
 				json.NewEncoder(w).Encode(map[string]interface{}{"status": "pending"})

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -21,8 +22,8 @@ func TestSubmitAndPoll(t *testing.T) {
 	if resp.Status != "pending" {
 		t.Fatalf("expected pending, got %s", resp.Status)
 	}
-	if resp.EncryptedPayload != "" {
-		t.Fatal("expected empty encrypted_payload for pending")
+	if resp.Response != nil {
+		t.Fatal("expected nil response for pending")
 	}
 }
 
@@ -59,7 +60,8 @@ func TestFulfillAndPoll(t *testing.T) {
 
 	q.Submit("intent-f", "tag-a", []byte(`{}`))
 
-	err := q.Fulfill("intent-f", "sealed-payload-data")
+	fulfillBody := []byte(`{"version":1,"action":"fulfill","intent_id":"intent-f","encrypted_payload":"sealed-payload-data"}`)
+	err := q.Fulfill("intent-f", fulfillBody)
 	if err != nil {
 		t.Fatalf("Fulfill: %v", err)
 	}
@@ -71,8 +73,14 @@ func TestFulfillAndPoll(t *testing.T) {
 	if resp.Status != "fulfilled" {
 		t.Fatalf("expected fulfilled, got %s", resp.Status)
 	}
-	if resp.EncryptedPayload != "sealed-payload-data" {
-		t.Fatalf("expected sealed-payload-data, got %s", resp.EncryptedPayload)
+	// Response should be the verbatim fulfill body.
+	if !json.Valid(resp.Response) {
+		t.Fatal("expected valid JSON in response")
+	}
+	var parsed map[string]interface{}
+	json.Unmarshal(resp.Response, &parsed)
+	if parsed["encrypted_payload"] != "sealed-payload-data" {
+		t.Fatalf("expected sealed-payload-data in response, got %v", parsed["encrypted_payload"])
 	}
 }
 
@@ -82,7 +90,7 @@ func TestRejectAndPoll(t *testing.T) {
 
 	q.Submit("intent-r", "tag-a", []byte(`{}`))
 
-	err := q.Reject("intent-r")
+	err := q.Reject("intent-r", []byte(`{"version":1,"action":"reject","intent_id":"intent-r"}`))
 	if err != nil {
 		t.Fatalf("Reject: %v", err)
 	}
@@ -94,13 +102,16 @@ func TestRejectAndPoll(t *testing.T) {
 	if resp.Status != "rejected" {
 		t.Fatalf("expected rejected, got %s", resp.Status)
 	}
+	if resp.Response == nil {
+		t.Fatal("expected non-nil response field for rejected intent")
+	}
 }
 
 func TestFulfillUnknownReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	err := q.Fulfill("nonexistent", "data")
+	err := q.Fulfill("nonexistent", []byte("data"))
 	if err == nil {
 		t.Fatal("expected error for unknown intent")
 	}
@@ -113,7 +124,7 @@ func TestRejectUnknownReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	err := q.Reject("nonexistent")
+	err := q.Reject("nonexistent", []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for unknown intent")
 	}
@@ -127,9 +138,9 @@ func TestFulfillAlreadyFulfilledReturnsError(t *testing.T) {
 	defer q.Stop()
 
 	q.Submit("intent-ff", "tag-a", []byte(`{}`))
-	q.Fulfill("intent-ff", "data")
+	q.Fulfill("intent-ff", []byte("data"))
 
-	err := q.Fulfill("intent-ff", "data2")
+	err := q.Fulfill("intent-ff", []byte("data2"))
 	if err == nil {
 		t.Fatal("expected error for already-terminal intent")
 	}
@@ -143,9 +154,9 @@ func TestRejectAlreadyRejectedReturnsError(t *testing.T) {
 	defer q.Stop()
 
 	q.Submit("intent-rr", "tag-a", []byte(`{}`))
-	q.Reject("intent-rr")
+	q.Reject("intent-rr", []byte(`{}`))
 
-	err := q.Reject("intent-rr")
+	err := q.Reject("intent-rr", []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error for already-terminal intent")
 	}
@@ -159,9 +170,9 @@ func TestFulfillAfterRejectReturnsError(t *testing.T) {
 	defer q.Stop()
 
 	q.Submit("intent-rf", "tag-a", []byte(`{}`))
-	q.Reject("intent-rf")
+	q.Reject("intent-rf", []byte(`{}`))
 
-	err := q.Fulfill("intent-rf", "data")
+	err := q.Fulfill("intent-rf", []byte("data"))
 	if err == nil {
 		t.Fatal("expected error for already-terminal intent")
 	}
@@ -176,7 +187,7 @@ func TestPullReturnsOnlyPendingForTag(t *testing.T) {
 	q.Submit("b1", "tag-b", []byte(`{"version":1,"action":"unwrap","intent_id":"b1"}`))
 
 	// Fulfill a2 — should no longer appear in pull.
-	q.Fulfill("a2", "sealed")
+	q.Fulfill("a2", []byte("sealed"))
 
 	resp := q.Pull("tag-a")
 	if len(resp.Intents) != 1 {
@@ -238,7 +249,7 @@ func TestFulfillAfterTTLReturnsUnknown(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	err := q.Fulfill("expire-f", "data")
+	err := q.Fulfill("expire-f", []byte("data"))
 	if err == nil {
 		t.Fatal("expected error fulfilling expired intent")
 	}
@@ -255,7 +266,7 @@ func TestRejectAfterTTLReturnsUnknown(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	err := q.Reject("expire-r")
+	err := q.Reject("expire-r", []byte(`{}`))
 	if err == nil {
 		t.Fatal("expected error rejecting expired intent")
 	}
@@ -303,7 +314,7 @@ func TestMultipleTagsIsolation(t *testing.T) {
 		t.Fatalf("expected 1 beta intent, got %d", len(beta.Intents))
 	}
 
-	q.Fulfill("iso-1", "sealed")
+	q.Fulfill("iso-1", []byte("sealed"))
 	beta2 := q.Pull("beta")
 	if len(beta2.Intents) != 1 {
 		t.Fatalf("beta should still have 1 intent, got %d", len(beta2.Intents))

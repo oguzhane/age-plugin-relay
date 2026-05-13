@@ -68,7 +68,7 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsyncTestJSON(w, http.StatusOK, resp)
 
 	case "fulfill":
-		if err := b.queue.Fulfill(req.IntentID, req.EncryptedPayload); err != nil {
+		if err := b.queue.Fulfill(req.IntentID, body); err != nil {
 			if err.Error() == "unknown_intent" {
 				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
 			} else {
@@ -79,7 +79,7 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsyncTestJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 
 	case "reject":
-		if err := b.queue.Reject(req.IntentID); err != nil {
+		if err := b.queue.Reject(req.IntentID, body); err != nil {
 			if err.Error() == "unknown_intent" {
 				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
 			} else {
@@ -199,15 +199,21 @@ func TestAsyncEndToEnd(t *testing.T) {
 	intent := pullResult.Intents[0]
 	t.Logf("Operator pulled intent %s", intent.IntentID)
 
+	// Operator unmarshals the verbatim request.
+	var intentReq relay.RelayRequest
+	if err := json.Unmarshal(intent.Request, &intentReq); err != nil {
+		t.Fatalf("Operator unmarshal request: %v", err)
+	}
+
 	// Operator decrypts the encrypted payload.
-	inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, []age.Identity{operatorIdentity})
+	inner, err := relay.DecryptPayload(intentReq.EncryptedPayload, []age.Identity{operatorIdentity})
 	if err != nil {
 		t.Fatalf("Operator decrypt failed: %v", err)
 	}
 	t.Log("Operator decrypted inner payload")
 
 	// Operator verifies outer hash.
-	if err := relay.VerifyRequestPayload(inner, intent.Request.Version, intent.Request.Action, intent.Request.IntentID, intent.Request.Tag, intent.Request.ExpiresAt); err != nil {
+	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
 		t.Fatalf("Operator verification failed: %v", err)
 	}
 	t.Log("Operator verified outer hash")
@@ -260,8 +266,12 @@ func TestAsyncEndToEnd(t *testing.T) {
 	}
 	t.Log("Plugin polled -> fulfilled")
 
-	// Plugin decrypts the response.
-	respPayload, err := relay.OpenResponse(pollResult.EncryptedPayload, ephemeral.Identity)
+	// Plugin decrypts the response — unmarshal the verbatim operator body.
+	var operatorBody relay.RelayRequest
+	if err := json.Unmarshal(pollResult.Response, &operatorBody); err != nil {
+		t.Fatalf("Plugin unmarshal poll response: %v", err)
+	}
+	respPayload, err := relay.OpenResponse(operatorBody.EncryptedPayload, ephemeral.Identity)
 	if err != nil {
 		t.Fatalf("Plugin decrypt failed: %v", err)
 	}
@@ -514,14 +524,20 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	intent := pullResult.Intents[0]
 	t.Logf("Operator found intent %s", intent.IntentID)
 
+	// Operator unmarshals the verbatim request.
+	var intentReq relay.RelayRequest
+	if err := json.Unmarshal(intent.Request, &intentReq); err != nil {
+		t.Fatalf("operator unmarshal: %v", err)
+	}
+
 	// Operator decrypts the encrypted payload.
-	inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, []age.Identity{operatorIdentity})
+	inner, err := relay.DecryptPayload(intentReq.EncryptedPayload, []age.Identity{operatorIdentity})
 	if err != nil {
 		t.Fatalf("operator decrypt: %v", err)
 	}
 
 	// Operator verifies.
-	if err := relay.VerifyRequestPayload(inner, intent.Request.Version, intent.Request.Action, intent.Request.IntentID, intent.Request.Tag, intent.Request.ExpiresAt); err != nil {
+	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
 		t.Fatalf("operator verify: %v", err)
 	}
 
@@ -714,12 +730,16 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	}
 
 	// The broker's view of the request should have encrypted_payload but NOT plaintext stanzas.
-	if pullResult.Intents[0].Request.EncryptedPayload == "" {
+	var pulledReq relay.RelayRequest
+	if err := json.Unmarshal(pullResult.Intents[0].Request, &pulledReq); err != nil {
+		t.Fatalf("unmarshal pulled request: %v", err)
+	}
+	if pulledReq.EncryptedPayload == "" {
 		t.Fatal("SECURITY: broker should store encrypted_payload")
 	}
 
 	// Operator fulfills with sealed key.
-	inner, _ := relay.DecryptPayload(pullResult.Intents[0].Request.EncryptedPayload, []age.Identity{operatorIdentity})
+	inner, _ := relay.DecryptPayload(pulledReq.EncryptedPayload, []age.Identity{operatorIdentity})
 	ageStanzas := make([]*age.Stanza, len(inner.Stanzas))
 	for i, s := range inner.Stanzas {
 		b, _ := base64.RawStdEncoding.DecodeString(s.Body)
@@ -749,14 +769,18 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	var pollResult broker.PollResponse
 	json.Unmarshal(pollRespBody, &pollResult)
 
-	// The broker stored encrypted_payload — verify it's NOT the plaintext file key.
+	// The broker stored the operator's verbatim body — verify it's NOT the plaintext file key.
 	fileKeyB64 := base64.RawStdEncoding.EncodeToString(fileKey)
-	if pollResult.EncryptedPayload == fileKeyB64 {
+	var pollFulfillReq relay.RelayRequest
+	if err := json.Unmarshal(pollResult.Response, &pollFulfillReq); err != nil {
+		t.Fatalf("unmarshal poll response: %v", err)
+	}
+	if pollFulfillReq.EncryptedPayload == fileKeyB64 {
 		t.Fatal("SECURITY: broker stored plaintext file key!")
 	}
 
 	// But the plugin CAN decrypt it.
-	decryptedResp, err := relay.OpenResponse(pollResult.EncryptedPayload, eph.Identity)
+	decryptedResp, err := relay.OpenResponse(pollFulfillReq.EncryptedPayload, eph.Identity)
 	if err != nil {
 		t.Fatalf("plugin decrypt: %v", err)
 	}
@@ -826,8 +850,14 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 
 	intent := pr.Intents[0]
 
+	// Operator unmarshals the verbatim request.
+	var intentReq relay.RelayRequest
+	if err := json.Unmarshal(intent.Request, &intentReq); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
 	// Operator decrypts.
-	inner, err := relay.DecryptPayload(intent.Request.EncryptedPayload, []age.Identity{operatorIdentity})
+	inner, err := relay.DecryptPayload(intentReq.EncryptedPayload, []age.Identity{operatorIdentity})
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
