@@ -53,8 +53,10 @@ type RelayRequest struct {
 	Stream           bool   `json:"stream,omitempty"`            // request SSE response
 	IntentID         string `json:"intent_id,omitempty"`         // plugin-generated, 16 random bytes hex
 	Tag              string `json:"tag,omitempty"`               // routing tag for operator pull
-	ExpiresAt        int64  `json:"expires_at,omitempty"`        // Unix timestamp (seconds)
-	EncryptedPayload string `json:"encrypted_payload,omitempty"` // age-encrypted inner payload
+	ExpiresAt        int64  `json:"expires_at,omitempty"`         // Unix timestamp (seconds)
+	IntentClaimPub   string `json:"intent_claim_pub,omitempty"`   // Ed25519 public key (base64 raw std), set on unwrap
+	IntentClaimSig   string `json:"intent_claim_sig,omitempty"`   // Ed25519 signature (base64 raw std), set on fulfill/reject
+	EncryptedPayload string `json:"encrypted_payload,omitempty"`  // age-encrypted inner payload
 }
 
 // RelayStanza is a single age stanza serialized for the relay protocol.
@@ -92,6 +94,14 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 
 	ephemeralRecipient := ephemeral.RecipientString()
 
+	// Generate intent claim keypair for action authorization.
+	claimPub, claimPriv, err := GenerateIntentClaim()
+	if err != nil {
+		return nil, fmt.Errorf("generating intent claim: %w", err)
+	}
+	claimPubB64 := EncodeIntentClaimPub(claimPub)
+	claimSecretB64 := EncodeIntentClaimSecret(claimPriv)
+
 	// Compute outer fields.
 	expiresAt := time.Now().Add(remote.TimeoutDuration()).Unix()
 	tagBytes := ComputeTag(innerRecipient)
@@ -108,10 +118,11 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	}
 
 	// Build and encrypt inner payload.
-	inner, err := BuildRequestPayload(1, "unwrap", remote.Stream, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
+	inner, err := BuildRequestPayload(1, "unwrap", remote.Stream, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient, claimPubB64)
 	if err != nil {
 		return nil, fmt.Errorf("building inner payload: %w", err)
 	}
+	inner.IntentClaimSecret = claimSecretB64
 
 	encryptedPayload, err := EncryptPayload(*inner, innerRecipient)
 	if err != nil {
@@ -126,6 +137,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 		IntentID:         intentID,
 		Tag:              tag,
 		ExpiresAt:        expiresAt,
+		IntentClaimPub:   claimPubB64,
 		EncryptedPayload: encryptedPayload,
 	}
 

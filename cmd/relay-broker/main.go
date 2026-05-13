@@ -124,15 +124,22 @@ func handleUnwrap(w http.ResponseWriter, body []byte, req *relay.RelayRequest, q
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
 	}
+	if req.IntentClaimPub == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_pub"})
+		return
+	}
 
 	tag := req.Tag
 
-	if err := q.Submit(req.IntentID, tag, body); err != nil {
-		if err.Error() == "duplicate_intent" {
+	if err := q.Submit(req.IntentID, tag, body, req.IntentClaimPub); err != nil {
+		switch err.Error() {
+		case "duplicate_intent":
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "duplicate_intent"})
-			return
+		case "missing_intent_claim_pub":
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_pub"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
@@ -179,13 +186,19 @@ func handleFulfill(w http.ResponseWriter, body []byte, req *relay.RelayRequest, 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing encrypted_payload"})
 		return
 	}
+	if req.IntentClaimSig == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_sig"})
+		return
+	}
 
-	if err := q.Fulfill(req.IntentID, body); err != nil {
+	if err := q.Fulfill(req.IntentID, body, req.IntentClaimSig, req.Version, req.Action, req.EncryptedPayload); err != nil {
 		switch err.Error() {
 		case "unknown_intent":
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
 		case "intent_already_terminal":
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "intent_already_terminal"})
+		case "invalid_claim_sig":
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid_claim_sig"})
 		default:
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		}
@@ -202,13 +215,21 @@ func handleReject(w http.ResponseWriter, body []byte, req *relay.RelayRequest, q
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_id"})
 		return
 	}
+	if req.IntentClaimSig == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_sig"})
+		return
+	}
 
-	if err := q.Reject(req.IntentID, body); err != nil {
+	encryptedPayload := req.EncryptedPayload // may be empty for reject, but canonical still hashes it
+
+	if err := q.Reject(req.IntentID, body, req.IntentClaimSig, req.Version, req.Action, encryptedPayload); err != nil {
 		switch err.Error() {
 		case "unknown_intent":
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
 		case "intent_already_terminal":
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "intent_already_terminal"})
+		case "invalid_claim_sig":
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid_claim_sig"})
 		default:
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		}

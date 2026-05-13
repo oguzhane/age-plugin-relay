@@ -29,6 +29,11 @@ type Intent struct {
 	// Used to index intents for operator pull queries.
 	Tag string
 
+	// IntentClaimPub is the Ed25519 public key (base64 raw std) provided by the
+	// plugin at submit time. The broker uses it to verify intent_claim_sig on
+	// fulfill/reject actions.
+	IntentClaimPub string
+
 	// Request is the original plugin POST body, stored verbatim.
 	Request []byte
 

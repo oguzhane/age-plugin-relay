@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/oguzhane/age-plugin-relay/relay"
 )
 
 // Queue is a thread-safe in-memory intent queue with TTL-based expiry.
@@ -35,21 +37,27 @@ func (q *Queue) Stop() {
 	close(q.stopSweep)
 }
 
-// Submit stores a new intent. Returns an error if the intent_id already exists (409).
-func (q *Queue) Submit(intentID, tag string, requestBody []byte) error {
+// Submit stores a new intent. Returns an error if the intent_id already exists (409)
+// or if intentClaimPub is empty (400).
+func (q *Queue) Submit(intentID, tag string, requestBody []byte, intentClaimPub string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if intentClaimPub == "" {
+		return fmt.Errorf("missing_intent_claim_pub")
+	}
 
 	if _, exists := q.intents[intentID]; exists {
 		return fmt.Errorf("duplicate_intent")
 	}
 
 	q.intents[intentID] = &Intent{
-		IntentID:  intentID,
-		Tag:       tag,
-		Request:   requestBody,
-		Status:    StatusPending,
-		CreatedAt: time.Now(),
+		IntentID:       intentID,
+		Tag:            tag,
+		IntentClaimPub: intentClaimPub,
+		Request:        requestBody,
+		Status:         StatusPending,
+		CreatedAt:      time.Now(),
 	}
 	return nil
 }
@@ -119,8 +127,10 @@ func (q *Queue) Pull(tag string) *PullResponse {
 
 // Fulfill marks an intent as fulfilled with the operator's response body.
 // The responseBody is stored verbatim and returned to the plugin on poll.
-// Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
+// The intentClaimSig is verified against the stored intent_claim_pub.
+// Returns an error if the intent doesn't exist, is expired, already terminal,
+// or the signature is invalid.
+func (q *Queue) Fulfill(intentID string, responseBody []byte, intentClaimSig string, version int, action string, encryptedPayload string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -136,6 +146,10 @@ func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
 
 	if intent.Status != StatusPending {
 		return fmt.Errorf("intent_already_terminal")
+	}
+
+	if err := relay.VerifyIntentClaim(intent.IntentClaimPub, intentClaimSig, version, action, intentID, encryptedPayload); err != nil {
+		return err
 	}
 
 	intent.Status = StatusFulfilled
@@ -145,8 +159,10 @@ func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
 
 // Reject marks an intent as rejected with the operator's response body.
 // The responseBody is stored verbatim and returned to the plugin on poll.
-// Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Reject(intentID string, responseBody []byte) error {
+// The intentClaimSig is verified against the stored intent_claim_pub.
+// Returns an error if the intent doesn't exist, is expired, already terminal,
+// or the signature is invalid.
+func (q *Queue) Reject(intentID string, responseBody []byte, intentClaimSig string, version int, action string, encryptedPayload string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -162,6 +178,10 @@ func (q *Queue) Reject(intentID string, responseBody []byte) error {
 
 	if intent.Status != StatusPending {
 		return fmt.Errorf("intent_already_terminal")
+	}
+
+	if err := relay.VerifyIntentClaim(intent.IntentClaimPub, intentClaimSig, version, action, intentID, encryptedPayload); err != nil {
+		return err
 	}
 
 	intent.Status = StatusRejected

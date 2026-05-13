@@ -144,7 +144,7 @@ func main() {
 		}
 
 		// 2. Verify outer hash and expiry.
-		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "payload verification: " + err.Error()})
 			return
 		}
