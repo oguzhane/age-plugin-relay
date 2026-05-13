@@ -133,7 +133,7 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
 ```json
 {
   "nonce": "<16 random bytes, hex>",
-  "outer_hash": "<SHA-256(version.action.intent_id.tag.expires_at), hex>",
+  "outer_hash": "<SHA-256(version.action.stream.intent_id.tag.expires_at), hex>",
   "stanzas": [
     { "type": "X25519", "args": ["..."], "body": "..." }
   ],
@@ -144,7 +144,7 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
 | Field | Description |
 |---|---|
 | `nonce` | 16 random bytes, hex-encoded. Ensures ciphertext uniqueness at the protocol level. Discarded after decryption. |
-| `outer_hash` | `SHA-256("version.action.intent_id.tag.expires_at")` — dot-separated, canonical. Binds the encrypted payload to the outer routing fields including expiry. |
+| `outer_hash` | `SHA-256("version.action.stream.intent_id.tag.expires_at")` — dot-separated, canonical. `stream` is `"0"` or `"1"`. Binds the encrypted payload to all outer routing fields including expiry. |
 | `stanzas` | Inner age stanzas (base64 raw standard bodies). |
 | `ephemeral_key` | Plugin's ephemeral age recipient string (`age1...`) for the response envelope. |
 
@@ -157,7 +157,7 @@ age-encrypted to the plugin's ephemeral recipient. Contains the unwrapped file k
 ```json
 {
   "nonce": "<16 random bytes, hex>",
-  "outer_hash": "<SHA-256(action.intent_id), hex>",
+  "outer_hash": "<SHA-256(version.action.intent_id), hex>",
   "file_key": "<base64: 16-byte age file key>"
 }
 ```
@@ -165,7 +165,7 @@ age-encrypted to the plugin's ephemeral recipient. Contains the unwrapped file k
 | Field | Description |
 |---|---|
 | `nonce` | 16 random bytes, hex-encoded. Ensures ciphertext uniqueness. Discarded after decryption. |
-| `outer_hash` | `SHA-256(action.intent_id)` — binds the sealed response to the action and specific intent. |
+| `outer_hash` | `SHA-256(version.action.intent_id)` — binds the sealed response to all outer envelope fields. |
 | `file_key` | The unwrapped age file key, base64 raw standard encoded. |
 
 **Encryption**: `age.Encrypt` (X25519 + HKDF + ChaCha20-Poly1305) to the plugin's ephemeral age recipient (extracted from the inner request payload). age internally generates a one-time ephemeral key per encryption. Wire format: base64-encoded standard age binary ciphertext (same as request direction).
@@ -177,13 +177,13 @@ The outer hash binds the encrypted blob to the cleartext routing fields. Any mod
 **Request outer hash** (verified by operator):
 
 ```
-SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")
+SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")
 ```
 
 Example:
 
 ```
-SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
+SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
 ```
 
 Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Deterministic on both sides.
@@ -191,13 +191,13 @@ Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Determini
 **Response outer hash** (verified by plugin):
 
 ```
-SHA-256("{action}.{intent_id}")
+SHA-256("{version}.{action}.{intent_id}")
 ```
 
 Example:
 
 ```
-SHA-256("unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
+SHA-256("1.fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 ```
 
 ### 3.6. Streaming (SSE)
@@ -276,11 +276,11 @@ Authorization: Bearer <auth_token>
 1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
 2. Parse inner payload.
 3. Check `expires_at` from the outer fields — reject if in the past.
-4. Recompute `SHA-256("version.action.intent_id.tag.expires_at")` from the outer fields.
+4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at")` from the outer fields.
 5. Compare against `outer_hash` — mismatch = tampered = reject.
 6. Extract `stanzas` and `ephemeral_key`.
 7. `identity.Unwrap(stanzas)` → file key.
-8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("fulfill".intent_id)`.
+8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("1.fulfill".intent_id)`.
 9. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
 10. Return response.
 
@@ -320,7 +320,7 @@ data: {"version":1,"action":"fulfill","intent_id":"a3f1...","encrypted_payload":
 1. Parse the `RelayRequest` envelope — extract `action` and `encrypted_payload`.
 2. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
 3. Parse inner payload.
-4. Recompute `SHA-256("{action}".intent_id)` using the action from the envelope and the plugin's own stored intent_id.
+4. Recompute `SHA-256("{version}.{action}".intent_id)` using the version and action from the envelope and the plugin's own stored intent_id.
 5. Compare against `outer_hash` — mismatch = tamper = fail.
 6. Extract `file_key`.
 7. Discard ephemeral keypair.
@@ -359,7 +359,7 @@ Plugin                                          Relay-Server
   │ 12. Parse envelope → extract action,             │
   │     encrypted_payload                            │
   │ 13. age.Decrypt(encrypted_payload, eph_identity) │
-  │ 14. Verify outer_hash == SHA-256(action.intent_id) │
+  │ 14. Verify outer_hash == SHA-256(version.action.intent_id) │
   │ 15. Extract file_key                             │
   │ 16. Discard ephemeral keypair                    │
   │                                                  │
@@ -446,11 +446,11 @@ The operator receives the verbatim outer envelope from the broker and processes 
 1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
 2. Parse inner payload.
 3. Check `expires_at` from the outer fields — reject if in the past.
-4. Recompute `SHA-256("version.action.intent_id.tag.expires_at")` from the outer fields.
+4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at")` from the outer fields.
 5. Compare against `outer_hash` — mismatch = broker tampered = reject the intent.
 6. Extract `stanzas` and `ephemeral_key`.
 7. `identity.Unwrap(stanzas)` → file key.
-8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("fulfill".intent_id)`.
+8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("1.fulfill".intent_id)`.
 9. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
 
 ### 5.5. Fulfill (operator → broker)
@@ -506,7 +506,7 @@ On receiving a `fulfilled` poll response:
 1. Parse `response` field (verbatim operator fulfill body) → extract `encrypted_payload`.
 2. `age.Decrypt(encrypted_payload, ephemeral_identity)` → inner response payload JSON.
 3. Parse inner payload.
-4. Recompute `SHA-256("fulfill".intent_id)` from the plugin's own stored intent_id.
+4. Recompute `SHA-256("1.fulfill".intent_id)` from the plugin's own stored intent_id.
 5. Compare against `outer_hash` — mismatch = tamper = fail.
 6. Extract `file_key`.
 7. Discard ephemeral keypair.
@@ -607,7 +607,7 @@ Plugin                          Broker                          Operator
   │     encrypted_payload,        │                                │
   │     eph_identity)             │                                │
   │ 15. Verify outer_hash         │                                │
-  │     == SHA-256("fulfill"     │                                │
+  │     == SHA-256("1.fulfill"  │                                │
   │       .intent_id)            │                                │
   │ 16. Extract file_key          │                                │
   │ 17. Discard ephemeral keypair │                                │
@@ -756,7 +756,7 @@ nonce               ✓ (generates it)    ✗ (opaque)          ✓ (discards it
 - The operator age-encrypts `encrypted_payload` to the plugin's ephemeral recipient from the original request.
 - Only a holder of the matching ephemeral identity (the plugin) can decrypt it.
 - A forged or tampered response fails `age.Decrypt`. The plugin MUST treat decryption failure as terminal.
-- The response includes `outer_hash = SHA-256(action.intent_id)` — the plugin verifies this to ensure the response matches the original action and intent.
+- The response includes `outer_hash = SHA-256(version.action.intent_id)` — the plugin verifies this to ensure the response matches the original version, action, and intent.
 
 ### 6.5. What the Broker Can Still Do
 

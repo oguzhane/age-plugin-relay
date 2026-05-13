@@ -150,7 +150,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	expiresAt := time.Now().Add(5 * time.Minute).Unix()
 
 	// Build and encrypt inner payload.
-	innerReq, err := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
+	innerReq, err := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	t.Log("Operator decrypted inner payload")
 
 	// Operator verifies outer hash.
-	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
+	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.Stream, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
 		t.Fatalf("Operator verification failed: %v", err)
 	}
 	t.Log("Operator verified outer hash")
@@ -231,7 +231,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	t.Log("Operator unwrapped file key")
 
 	// Operator seals response to plugin's ephemeral recipient.
-	respInner, _ := relay.BuildResponsePayload("fulfill", intentID, recoveredFileKey)
+	respInner, _ := relay.BuildResponsePayload(1, "fulfill", intentID, recoveredFileKey)
 	sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 	if err != nil {
 		t.Fatalf("Operator seal failed: %v", err)
@@ -275,7 +275,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plugin decrypt failed: %v", err)
 	}
-	if err := relay.VerifyResponsePayload(respPayload, "fulfill", intentID); err != nil {
+	if err := relay.VerifyResponsePayload(respPayload, 1, "fulfill", intentID); err != nil {
 		t.Fatalf("Plugin response verification failed: %v", err)
 	}
 	decryptedFileKey, err := base64.RawStdEncoding.DecodeString(respPayload.FileKey)
@@ -537,7 +537,7 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	}
 
 	// Operator verifies.
-	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
+	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.Stream, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
 		t.Fatalf("operator verify: %v", err)
 	}
 
@@ -553,7 +553,7 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	}
 
 	// Operator seals response to plugin's ephemeral recipient.
-	respInner, _ := relay.BuildResponsePayload("fulfill", intent.IntentID, opFileKey)
+	respInner, _ := relay.BuildResponsePayload(1, "fulfill", intent.IntentID, opFileKey)
 	sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 	if err != nil {
 		t.Fatal(err)
@@ -695,7 +695,7 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	defer eph.Clear()
 	ephRecipient := eph.RecipientString()
 
-	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephRecipient)
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, relayStanzas, ephRecipient)
 	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
 	// Submit to broker.
@@ -747,7 +747,7 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	}
 	opFileKey, _ := operatorIdentity.Unwrap(ageStanzas)
 
-	respInner, _ := relay.BuildResponsePayload("fulfill", intentID, opFileKey)
+	respInner, _ := relay.BuildResponsePayload(1, "fulfill", intentID, opFileKey)
 	sealed, _ := relay.SealResponse(*respInner, inner.EphemeralKey)
 
 	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
@@ -815,7 +815,7 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 	defer eph.Clear()
 	ephRecipient := eph.RecipientString()
 
-	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, nil, ephRecipient)
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, nil, ephRecipient)
 	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
 	// Submit with correct outer fields.
@@ -863,28 +863,28 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 	}
 
 	// Verify with correct outer fields — should pass.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", intentID, tag, expiresAt)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, tag, expiresAt)
 	if err != nil {
 		t.Fatalf("valid verification should pass: %v", err)
 	}
 	t.Log("Valid outer hash verified")
 
 	// Verify with tampered intent_id — should fail.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", "tampered-intent", tag, expiresAt)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, "tampered-intent", tag, expiresAt)
 	if err == nil {
 		t.Fatal("SECURITY: tampered intent_id should fail verification")
 	}
 	t.Log("Tampered intent_id correctly rejected")
 
 	// Verify with tampered tag — should fail.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", intentID, "tampered-tag", expiresAt)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, "tampered-tag", expiresAt)
 	if err == nil {
 		t.Fatal("SECURITY: tampered tag should fail verification")
 	}
 	t.Log("Tampered tag correctly rejected")
 
 	// Verify with tampered expires_at — should fail.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", intentID, tag, expiresAt+1000)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, tag, expiresAt+1000)
 	if err == nil {
 		t.Fatal("SECURITY: tampered expires_at should fail verification")
 	}

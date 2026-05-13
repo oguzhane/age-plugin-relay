@@ -98,7 +98,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	}
 
 	// Build and encrypt inner payload.
-	inner, err := BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
+	inner, err := BuildRequestPayload(1, "unwrap", remote.Stream, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
 	if err != nil {
 		return nil, fmt.Errorf("building inner payload: %w", err)
 	}
@@ -243,7 +243,7 @@ func pollForResult(client *http.Client, remote RemoteConfig, intentID, token str
 				if err := json.Unmarshal(pollResp.Response, &fulfillReq); err != nil {
 					return nil, fmt.Errorf("parsing fulfill response for intent %s: %w", intentID, err)
 				}
-				return extractFileKey(RelayResponse{EncryptedPayload: fulfillReq.EncryptedPayload}, ephemeral, fulfillReq.Action, intentID)
+				return extractFileKey(RelayResponse{EncryptedPayload: fulfillReq.EncryptedPayload}, ephemeral, fulfillReq.Version, fulfillReq.Action, intentID)
 			}
 			return nil, fmt.Errorf("async intent %s: fulfilled but no response", intentID)
 		case "rejected":
@@ -275,12 +275,12 @@ func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair, intentID
 		return nil, fmt.Errorf("decoding relay response: %w", err)
 	}
 
-	return extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Action, intentID)
+	return extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Version, envelope.Action, intentID)
 }
 
 // extractFileKey opens the age-encrypted response, verifies the outer hash,
 // and returns the file key.
-func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, action, intentID string) ([]byte, error) {
+func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, version int, action, intentID string) ([]byte, error) {
 	if resp.EncryptedPayload == "" {
 		return nil, fmt.Errorf("relay response contains no encrypted_payload")
 	}
@@ -290,7 +290,7 @@ func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, action, int
 		return nil, fmt.Errorf("opening sealed response: %w", err)
 	}
 
-	if err := VerifyResponsePayload(inner, action, intentID); err != nil {
+	if err := VerifyResponsePayload(inner, version, action, intentID); err != nil {
 		return nil, fmt.Errorf("verifying response payload: %w", err)
 	}
 
@@ -372,7 +372,7 @@ func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair, intentI
 		if err := json.Unmarshal([]byte(data), &envelope); err != nil {
 			return nil, false, fmt.Errorf("decoding SSE result: %w", err)
 		}
-		fileKey, err := extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Action, intentID)
+		fileKey, err := extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Version, envelope.Action, intentID)
 		if err != nil {
 			return nil, false, fmt.Errorf("extracting file key from SSE: %w", err)
 		}

@@ -73,13 +73,13 @@ Each stanza:
 **Outer hash computation:**
 
 ```
-SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")
+SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")
 ```
 
 Example:
 
 ```
-SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
+SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
 ```
 
 ---
@@ -261,19 +261,19 @@ Encrypted with `age.Encrypt` to the plugin's ephemeral recipient (`ephemeral_key
 | Field | Type | Description |
 |---|---|---|
 | `nonce` | string | 16 random bytes, hex-encoded (32 chars). Ensures ciphertext uniqueness |
-| `outer_hash` | string | SHA-256 hex (64 chars). Binds response to the action and intent |
+| `outer_hash` | string | SHA-256 hex (64 chars). Binds response to all outer envelope fields (version, action, intent_id) |
 | `file_key` | string | The unwrapped age file key, base64 raw standard encoded (16 bytes) |
 
 **Outer hash computation:**
 
 ```
-SHA-256("fulfill.{intent_id}")
+SHA-256("{version}.{action}.{intent_id}")
 ```
 
 Example:
 
 ```
-SHA-256("fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
+SHA-256("1.fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 ```
 
 ---
@@ -302,11 +302,11 @@ After receiving the request:
 4. Validate `encrypted_payload` is present.
 5. `age.Decrypt(encrypted_payload, identity)` → `InnerRequestPayload`.
 6. Check `expires_at` — reject if in the past.
-7. Recompute `SHA-256("1.unwrap." + intent_id + "." + tag + "." + expires_at)`.
+7. Recompute `SHA-256("1.unwrap." + stream + "." + intent_id + "." + tag + "." + expires_at)` where `stream` is `"0"` or `"1"`.
 8. Compare against `outer_hash` — mismatch = reject.
 9. Decode stanzas from inner payload.
 10. Try each local identity: `identity.Unwrap(stanzas)` → file key.
-11. Build `InnerResponsePayload`: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("fulfill." + intent_id)`.
+11. Build `InnerResponsePayload`: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("1.fulfill." + intent_id)`.
 12. `age.Encrypt(inner_response, ephemeral_key)` → sealed `encrypted_payload`.
 13. Return `RelayRequest` envelope as JSON or SSE `result` event.
 
@@ -407,5 +407,5 @@ type InnerResponsePayload struct {
 
 | Direction | Formula | Example |
 |---|---|---|
-| Request (plugin → server) | `SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.a3f1...7b8c.QPg24g.1715350800")` |
-| Response (server → plugin) | `SHA-256("{action}.{intent_id}")` | `SHA-256("fulfill.a3f1...7b8c")` |
+| Request (plugin → server) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800")` |
+| Response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |

@@ -38,7 +38,7 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		}
 
 		// Verify.
-		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(RelayResponse{Error: "verify: " + err.Error()})
 			return
@@ -59,7 +59,7 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		}
 
 		// Build and seal response.
-		respInner, _ := BuildResponsePayload("fulfill", req.IntentID, fileKey)
+		respInner, _ := BuildResponsePayload(1, "fulfill", req.IntentID, fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
 		resp := RelayRequest{Version: 1, Action: "fulfill", IntentID: req.IntentID, EncryptedPayload: sealed}

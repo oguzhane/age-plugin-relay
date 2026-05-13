@@ -336,7 +336,7 @@ func TestBrokerBlindnessVerification(t *testing.T) {
 			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
 			return
 		}
-		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
 			return
@@ -347,7 +347,7 @@ func TestBrokerBlindnessVerification(t *testing.T) {
 			stanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: body}
 		}
 		fileKey, _ := identity.Unwrap(stanzas)
-		respInner, _ := BuildResponsePayload("fulfill", req.IntentID, fileKey)
+		respInner, _ := BuildResponsePayload(1, "fulfill", req.IntentID, fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 		json.NewEncoder(w).Encode(RelayRequest{Version: 1, Action: "fulfill", IntentID: req.IntentID, EncryptedPayload: sealed})
 	}))
@@ -405,7 +405,7 @@ func TestResponseOuterHashTamperingE2E(t *testing.T) {
 		fileKey, _ := identity.Unwrap(stanzas)
 
 		// Build response with WRONG intent_id
-		respInner, _ := BuildResponsePayload("unwrap", "wrong-intent-id", fileKey)
+		respInner, _ := BuildResponsePayload(1, "fulfill", "wrong-intent-id", fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 		json.NewEncoder(w).Encode(RelayRequest{Version: 1, Action: "fulfill", IntentID: req.IntentID, EncryptedPayload: sealed})
 	}))

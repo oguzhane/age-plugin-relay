@@ -144,7 +144,7 @@ func main() {
 		}
 
 		// 2. Verify outer hash and expiry.
-		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "payload verification: " + err.Error()})
 			return
 		}
@@ -171,7 +171,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[relay-server] Unwrap succeeded, sealing response\n")
 
 				// 5. Build response inner payload.
-				respInner, err := relay.BuildResponsePayload("fulfill", req.IntentID, fileKey)
+				respInner, err := relay.BuildResponsePayload(1, "fulfill", req.IntentID, fileKey)
 				clear(fileKey)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "building response payload"})

@@ -124,7 +124,7 @@ func main() {
 			}
 
 			// 2. Verify outer hash and expiry.
-			if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+			if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
 				if err := rejectIntent(brokerURL, intent.IntentID, authToken); err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
@@ -163,7 +163,7 @@ func main() {
 			}
 
 			// 4. Build response payload and seal with age encryption to plugin's ephemeral recipient.
-			respInner, err := relay.BuildResponsePayload("fulfill", intent.IntentID, fileKey)
+			respInner, err := relay.BuildResponsePayload(1, "fulfill", intent.IntentID, fileKey)
 			clear(fileKey)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Build response error: %v — rejecting\n", err)

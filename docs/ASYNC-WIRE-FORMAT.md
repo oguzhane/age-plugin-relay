@@ -52,7 +52,7 @@ Three actors: **Plugin**, **Broker**, **Operator**.
 }
 ```
 
-`outer_hash` = `SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")`
+`outer_hash` = `SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")`
 
 ### Response — 202 Accepted
 
@@ -162,7 +162,7 @@ If no pending intents match the tag:
 }
 ```
 
-`outer_hash` = `SHA-256("fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")`
+`outer_hash` = `SHA-256("1.fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")`
 
 ### Response — 200 OK
 
@@ -320,7 +320,7 @@ In the sync flow (relay-server, not broker), the plugin sends the same `unwrap` 
 }
 ```
 
-The response uses the same `RelayRequest` envelope as the async flow's operator fulfill body. Both sync and async responses use `action: "fulfill"` and the inner `outer_hash` is `SHA-256("fulfill.<intent_id>")`.
+The response uses the same `RelayRequest` envelope as the async flow's operator fulfill body. Both sync and async responses use `action: "fulfill"` and the inner `outer_hash` is `SHA-256("{version}.fulfill.{intent_id}")`.
 
 ### Sync response — 200 OK (SSE)
 
@@ -432,6 +432,6 @@ type RelayStanza struct {
 
 | Direction | Formula | Example |
 |---|---|---|
-| Request (plugin → server/operator) | `SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.a3f1...7b8c.QPg24g.1715350800")` |
-| Sync response (server → plugin) | `SHA-256("fulfill.{intent_id}")` | `SHA-256("fulfill.a3f1...7b8c")` |
-| Async response (operator → plugin) | `SHA-256("fulfill.{intent_id}")` | `SHA-256("fulfill.a3f1...7b8c")` |
+| Request (plugin → server/operator) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800")` |
+| Sync response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
+| Async response (operator → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
