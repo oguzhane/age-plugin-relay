@@ -52,6 +52,8 @@ Three actors: **Plugin**, **Broker**, **Operator**.
 }
 ```
 
+`outer_hash` covers every envelope field outside `encrypted_payload` (the [Complete Outer Field Binding](ARCHITECTURE.md#35-outer-hash-construction) principle):
+
 `outer_hash` = `SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")`
 
 ### Response — 202 Accepted
@@ -161,6 +163,8 @@ If no pending intents match the tag:
   "file_key": "<base64 raw std: 16-byte age file key>"
 }
 ```
+
+`outer_hash` covers every response envelope field outside `encrypted_payload`:
 
 `outer_hash` = `SHA-256("1.fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")`
 
@@ -429,6 +433,8 @@ type RelayStanza struct {
 ---
 
 ## Outer Hash Summary
+
+> Every field in the cleartext envelope outside `encrypted_payload` MUST be included in the outer hash. See [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
 
 | Direction | Formula | Example |
 |---|---|---|

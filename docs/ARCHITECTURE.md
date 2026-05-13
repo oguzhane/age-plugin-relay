@@ -172,7 +172,36 @@ age-encrypted to the plugin's ephemeral recipient. Contains the unwrapped file k
 
 ### 3.5. Outer Hash Construction
 
+> **Fundamental Principle: Complete Outer Field Binding**
+>
+> The outer hash MUST include every field in the envelope that exists outside `encrypted_payload`. No exceptions. If a field is present in the cleartext JSON envelope, it MUST be an input to the outer hash. This is a non-negotiable protocol invariant.
+>
+> **Why:** The broker (or any network intermediary) can see and modify cleartext envelope fields. The outer hash — computed inside the encrypted payload before encryption, and recomputed by the verifier after decryption — is the only mechanism that detects such tampering. Any field omitted from the hash is a field the broker can silently alter without detection.
+>
+> **Rule:** When adding a new field to `RelayRequest`, you MUST also add it to the corresponding `OuterHash*` function in `relay/payload.go`. Failing to do so creates a silent security vulnerability where the broker can tamper with the new field undetected.
+
 The outer hash binds the encrypted blob to the cleartext routing fields. Any modification by the broker is detected.
+
+**Request envelope fields** (plugin → server/operator):
+
+| Envelope field | Included in outer hash |
+|---|---|
+| `version` | ✓ |
+| `action` | ✓ |
+| `stream` | ✓ (as `"0"` or `"1"`) |
+| `intent_id` | ✓ |
+| `tag` | ✓ |
+| `expires_at` | ✓ (as decimal string) |
+| `encrypted_payload` | — (this IS the encrypted blob; the hash lives inside it) |
+
+**Response envelope fields** (server/operator → plugin):
+
+| Envelope field | Included in outer hash |
+|---|---|
+| `version` | ✓ |
+| `action` | ✓ |
+| `intent_id` | ✓ |
+| `encrypted_payload` | — (this IS the encrypted blob; the hash lives inside it) |
 
 **Request outer hash** (verified by operator):
 
@@ -677,7 +706,7 @@ Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path 
 - **Encryption is offline** — uses only the inner recipient's public key. No network, no relay, no hardware.
 - **No secrets in the plugin** — the recipient contains only a public key string; the identity contains only a tag and remote name.
 - **End-to-end encrypted payloads** — stanzas and file keys are never visible to the broker or any intermediary.
-- **Tamper detection** — SHA-256 outer hash binds encrypted payloads to cleartext routing fields.
+- **Tamper detection** — SHA-256 outer hash binds encrypted payloads to cleartext routing fields. Every envelope field outside `encrypted_payload` is included in the hash — this is a fundamental protocol invariant (see §3.5).
 - **Forward secrecy** — plugin generates a fresh ephemeral age X25519 identity per intent; age internally generates fresh ephemeral keys per encryption. Both discarded after use.
 - **Transport-independent** — encrypted end-to-end even over plaintext HTTP.
 - **With SOPS key groups + Shamir** — intercepting one group's unwrapped share is information-theoretically useless without the other share(s).

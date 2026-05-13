@@ -3,9 +3,17 @@
 // The encrypted payload feature provides end-to-end confidentiality through a
 // zero-trust broker. Both directions use age encryption as the sole primitive:
 // request payloads are age-encrypted to the operator's recipient, and response
-// payloads are age-encrypted to the plugin's ephemeral recipient. Both directions
-// include a SHA-256 outer hash binding the encrypted blob to the cleartext routing
-// fields, ensuring tamper detection.
+// payloads are age-encrypted to the plugin's ephemeral recipient.
+//
+// FUNDAMENTAL PRINCIPLE — Complete Outer Field Binding:
+//
+// The outer hash inside every encrypted payload MUST cover every field in the
+// cleartext JSON envelope except encrypted_payload itself. This is the sole
+// mechanism that detects broker tampering of routing fields. Any field omitted
+// from the hash is a field the broker can silently alter without detection.
+//
+// When adding a new field to RelayRequest, you MUST also add it to the
+// corresponding OuterHash function below. See ARCHITECTURE.md §3.5.
 package relay
 
 import (
@@ -29,7 +37,7 @@ import (
 // public key for response encryption, and integrity fields.
 type InnerRequestPayload struct {
 	Nonce        string        `json:"nonce"`         // 16 random bytes, hex-encoded
-	OuterHash    string        `json:"outer_hash"`    // SHA-256 of outer fields
+	OuterHash    string        `json:"outer_hash"`    // SHA-256 of ALL outer envelope fields (see package doc)
 	ExpiresAt    int64         `json:"expires_at"`    // Unix timestamp (seconds)
 	Stanzas      []RelayStanza `json:"stanzas"`       // inner age stanzas
 	EphemeralKey string        `json:"ephemeral_key"` // age recipient string (age1...)
@@ -39,16 +47,19 @@ type InnerRequestPayload struct {
 // back to the plugin. It contains the unwrapped file key and integrity fields.
 type InnerResponsePayload struct {
 	Nonce     string `json:"nonce"`      // 16 random bytes, hex-encoded
-	OuterHash string `json:"outer_hash"` // SHA-256 of action.intent_id
+	OuterHash string `json:"outer_hash"` // SHA-256 of ALL outer envelope fields (see package doc)
 	FileKey   string `json:"file_key"`   // base64 raw standard, 16-byte age file key
 }
 
 // OuterHashRequest computes the SHA-256 hash that binds the encrypted request
-// payload to the outer routing fields. The canonical input is:
+// payload to every outer envelope field (the Complete Outer Field Binding principle).
 //
-//	"{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}"
+// Inputs: every RelayRequest field except encrypted_payload.
+// Canonical form: "{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}"
+// where stream is "0" or "1". Dot-separated, no JSON, no whitespace.
 //
-// All fields are dot-separated, no JSON, no whitespace.
+// IMPORTANT: If a new field is added to the request envelope, it MUST be added
+// here. Omitting a field allows the broker to tamper with it undetected.
 func OuterHashRequest(version int, action string, stream bool, intentID, tag string, expiresAt int64) string {
 	streamStr := "0"
 	if stream {
@@ -60,9 +71,13 @@ func OuterHashRequest(version int, action string, stream bool, intentID, tag str
 }
 
 // OuterHashResponse computes the SHA-256 hash that binds the encrypted response
-// payload to all outer envelope fields. The canonical input is:
+// payload to every outer envelope field (the Complete Outer Field Binding principle).
 //
-//	"{version}.{action}.{intent_id}"
+// Inputs: every response envelope field except encrypted_payload.
+// Canonical form: "{version}.{action}.{intent_id}"
+//
+// IMPORTANT: If a new field is added to the response envelope, it MUST be added
+// here. Omitting a field allows the broker to tamper with it undetected.
 func OuterHashResponse(version int, action, intentID string) string {
 	canonical := strconv.Itoa(version) + "." + action + "." + intentID
 	h := sha256.Sum256([]byte(canonical))

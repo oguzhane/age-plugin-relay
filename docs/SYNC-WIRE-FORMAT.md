@@ -57,7 +57,7 @@ Encrypted with `age.Encrypt` to the relay-server's age recipient (the `unwrap_re
 | Field | Type | Description |
 |---|---|---|
 | `nonce` | string | 16 random bytes, hex-encoded (32 chars). Ensures ciphertext uniqueness |
-| `outer_hash` | string | SHA-256 hex (64 chars). Binds encrypted payload to outer routing fields |
+| `outer_hash` | string | SHA-256 hex (64 chars). Covers every envelope field outside `encrypted_payload` — see [Complete Outer Field Binding](ARCHITECTURE.md#35-outer-hash-construction) |
 | `expires_at` | int64 | Duplicated from outer envelope. Used for expiry check after decryption |
 | `stanzas` | array | The age stanzas from the original `age.Encrypt` operation |
 | `ephemeral_key` | string | Plugin's ephemeral age X25519 public key (`age1...`). Response is encrypted to this |
@@ -71,6 +71,8 @@ Each stanza:
 | `body` | string | Stanza body, base64 raw standard encoded |
 
 **Outer hash computation:**
+
+> **Complete Outer Field Binding:** The outer hash MUST include every envelope field outside `encrypted_payload`. This is a fundamental protocol invariant — see [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
 
 ```
 SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")
@@ -261,10 +263,10 @@ Encrypted with `age.Encrypt` to the plugin's ephemeral recipient (`ephemeral_key
 | Field | Type | Description |
 |---|---|---|
 | `nonce` | string | 16 random bytes, hex-encoded (32 chars). Ensures ciphertext uniqueness |
-| `outer_hash` | string | SHA-256 hex (64 chars). Binds response to all outer envelope fields (version, action, intent_id) |
+| `outer_hash` | string | SHA-256 hex (64 chars). Covers every envelope field outside `encrypted_payload` — see [Complete Outer Field Binding](ARCHITECTURE.md#35-outer-hash-construction) |
 | `file_key` | string | The unwrapped age file key, base64 raw standard encoded (16 bytes) |
 
-**Outer hash computation:**
+**Outer hash computation** (covers all response envelope fields outside `encrypted_payload`):
 
 ```
 SHA-256("{version}.{action}.{intent_id}")
@@ -404,6 +406,8 @@ type InnerResponsePayload struct {
 ---
 
 ## Outer Hash Summary
+
+> Every field in the cleartext envelope outside `encrypted_payload` MUST be included in the outer hash. See [ARCHITECTURE.md §3.5](ARCHITECTURE.md#35-outer-hash-construction).
 
 | Direction | Formula | Example |
 |---|---|---|
