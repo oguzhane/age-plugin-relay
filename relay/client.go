@@ -45,10 +45,10 @@ type asyncPollResponse struct {
 type RelayRequest struct {
 	Version          int    `json:"version"`
 	Action           string `json:"action"`
-	Stream           bool   `json:"stream,omitempty"`             // request SSE response
-	IntentID         string `json:"intent_id,omitempty"`          // plugin-generated, 16 random bytes hex
-	Tag              string `json:"tag,omitempty"`                // routing tag for operator pull
-	ExpiresAt        int64  `json:"expires_at,omitempty"`         // Unix timestamp (seconds)
+	Stream           bool   `json:"stream,omitempty"`            // request SSE response
+	IntentID         string `json:"intent_id,omitempty"`         // plugin-generated, 16 random bytes hex
+	Tag              string `json:"tag,omitempty"`               // routing tag for operator pull
+	ExpiresAt        int64  `json:"expires_at,omitempty"`        // Unix timestamp (seconds)
 	EncryptedPayload string `json:"encrypted_payload,omitempty"` // age-encrypted inner payload
 }
 
@@ -252,7 +252,14 @@ func pollForResult(client *http.Client, remote RemoteConfig, intentID, token str
 			}
 			return nil, fmt.Errorf("async intent %s: fulfilled but no response", intentID)
 		case "rejected":
-			return nil, fmt.Errorf("async intent %s: rejected by operator", intentID)
+			if pollResp.Response != nil {
+				var rejectReq RelayRequest
+				if err := json.Unmarshal(pollResp.Response, &rejectReq); err != nil {
+					return nil, fmt.Errorf("parsing reject response for intent %s: %w", intentID, err)
+				}
+				return nil, verifyReject(rejectReq, ephemeral, intentID)
+			}
+			return nil, fmt.Errorf("async intent %s: rejected but no response", intentID)
 		default:
 			// Unknown status — retry.
 			continue
@@ -325,7 +332,7 @@ func verifyReject(envelope RelayRequest, ephemeral *EphemeralKeypair, intentID s
 	if err := VerifyResponsePayload(inner, envelope.Version, "reject", intentID); err != nil {
 		return fmt.Errorf("verifying reject payload: %w", err)
 	}
-	return fmt.Errorf("sync intent %s: rejected (no matching identity)", intentID)
+	return fmt.Errorf("intent %s: rejected (no matching identity)", intentID)
 }
 
 // readSSEResponse parses a Server-Sent Events stream, looking for a "result"

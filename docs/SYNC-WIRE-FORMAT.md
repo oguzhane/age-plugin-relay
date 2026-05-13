@@ -437,4 +437,5 @@ type InnerResponsePayload struct {
 | Direction | Formula | Example |
 |---|---|---|
 | Request (plugin → server) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800")` |
-| Response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
+| Fulfill response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
+| Reject response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.reject.a3f1...7b8c")` |

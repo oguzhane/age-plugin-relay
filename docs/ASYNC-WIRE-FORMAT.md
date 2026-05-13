@@ -204,7 +204,8 @@ If no pending intents match the tag:
 {
   "version": 1,
   "action": "reject",
-  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c"
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+  "encrypted_payload": "<base64: age-encrypted InnerResponsePayload with empty file_key>"
 }
 ```
 
@@ -213,6 +214,19 @@ If no pending intents match the tag:
 | `version` | int | Always `1` |
 | `action` | string | `"reject"` |
 | `intent_id` | string | The intent being rejected |
+| `encrypted_payload` | string | Base64 age ciphertext. Encrypted to plugin's ephemeral recipient. Contains `InnerResponsePayload{nonce, outer_hash, file_key:""}` |
+
+#### Inside `encrypted_payload` (decrypted by plugin only)
+
+```json
+{
+  "nonce": "1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b",
+  "outer_hash": "<SHA-256 hex of '1.reject.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c'>",
+  "file_key": ""
+}
+```
+
+The `outer_hash` covers every response envelope field outside `encrypted_payload`: `SHA-256("{version}.{action}.{intent_id}")`. The plugin decrypts and verifies this to confirm the reject is authentic (not forged by the broker).
 
 ### Response — 200 OK
 
@@ -292,12 +306,13 @@ The `response` field is the **verbatim original** operator fulfill POST body del
   "response": {
     "version": 1,
     "action": "reject",
-    "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c"
+    "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+    "encrypted_payload": "<base64: age-encrypted InnerResponsePayload with empty file_key>"
   }
 }
 ```
 
-The `response` field is the **verbatim original** operator reject POST body delivered as raw JSON.
+The `response` field is the **verbatim original** operator reject POST body delivered as raw JSON. The plugin decrypts `encrypted_payload` and verifies `outer_hash` to confirm the reject is authentic.
 
 ### Response — 404 Not Found (expired or unknown)
 
@@ -460,5 +475,5 @@ type RelayStanza struct {
 | Direction | Formula | Example |
 |---|---|---|
 | Request (plugin → server/operator) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800")` |
-| Sync response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
-| Async response (operator → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
+| Fulfill response (server/operator → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
+| Reject response (server/operator → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.reject.a3f1...7b8c")` |

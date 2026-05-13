@@ -315,7 +315,7 @@ func TestAsyncRejectionFlow(t *testing.T) {
 	}
 
 	// Operator rejects.
-	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: intentID}
+	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: intentID, EncryptedPayload: "opaque-reject"}
 	rejectBody, _ := json.Marshal(rejectReq)
 	rejectHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(rejectBody))
 	rejectHTTP.Header.Set("Content-Type", "application/json")
@@ -413,7 +413,7 @@ func TestAsyncFulfillAfterRejectReturns409(t *testing.T) {
 	sResp.Body.Close()
 
 	// Reject.
-	reject := relay.RelayRequest{Version: 1, Action: "reject", IntentID: "terminal-test"}
+	reject := relay.RelayRequest{Version: 1, Action: "reject", IntentID: "terminal-test", EncryptedPayload: "opaque-reject"}
 	rb, _ := json.Marshal(reject)
 	rr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(rb))
 	rr.Header.Set("Content-Type", "application/json")
@@ -635,8 +635,26 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 		t.Fatal("no intents")
 	}
 
+	// Decrypt the original request to get the ephemeral key.
+	var origReq relay.RelayRequest
+	json.Unmarshal(pr.Intents[0].Request, &origReq)
+	inner, err := relay.DecryptPayload(origReq.EncryptedPayload, []age.Identity{operatorIdentity})
+	if err != nil {
+		t.Fatalf("decrypting request payload: %v", err)
+	}
+
+	// Build authenticated reject with encrypted payload.
+	rejectInner, err := relay.BuildResponsePayload(1, "reject", pr.Intents[0].IntentID, nil)
+	if err != nil {
+		t.Fatalf("building reject payload: %v", err)
+	}
+	rejectSealed, err := relay.SealResponse(*rejectInner, inner.EphemeralKey)
+	if err != nil {
+		t.Fatalf("sealing reject payload: %v", err)
+	}
+
 	// Reject.
-	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: pr.Intents[0].IntentID}
+	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: pr.Intents[0].IntentID, EncryptedPayload: rejectSealed}
 	rb, _ := json.Marshal(rejectReq)
 	rh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(rb))
 	rh.Header.Set("Content-Type", "application/json")
