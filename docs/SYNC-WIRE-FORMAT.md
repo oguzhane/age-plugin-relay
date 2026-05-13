@@ -157,13 +157,26 @@ Returned when auth token is required but missing or wrong.
 }
 ```
 
-#### Error — 404 Not Found
+#### Reject — 200 OK
 
-Returned when no identity can unwrap the stanzas.
+Returned when no identity can unwrap the stanzas. Uses the same `RelayRequest` envelope shape as fulfill, with `action: "reject"` and an `encrypted_payload` containing an `InnerResponsePayload` with empty `file_key`. The plugin decrypts and verifies the outer hash to confirm authenticity.
 
 ```json
 {
-  "error": "no_matching_identity"
+  "version": 1,
+  "action": "reject",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+  "encrypted_payload": "<base64: age-encrypted InnerResponsePayload with empty file_key>"
+}
+```
+
+Inside `encrypted_payload`:
+
+```json
+{
+  "nonce": "1a2b3c4d5e6f7a8b1a2b3c4d5e6f7a8b",
+  "outer_hash": "<SHA-256 hex of '1.reject.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c'>",
+  "file_key": ""
 }
 ```
 
@@ -216,11 +229,21 @@ The `data` field is a JSON-serialized `RelayRequest` envelope (same shape as the
 
 ```
 event: error
-data: {"error":"no_matching_identity"}
+data: {"error":"some error message"}
 
 ```
 
-The `data` field is a JSON-serialized `RelayResponse` with the `error` field set.
+The `data` field is a JSON-serialized `RelayResponse` with the `error` field set. Used for errors other than no-matching-identity (e.g., decryption failure, invalid payload).
+
+#### Reject event
+
+```
+event: reject
+data: {"version":1,"action":"reject","intent_id":"a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c","encrypted_payload":"<base64>"}
+
+```
+
+The `data` field is a JSON-serialized `RelayRequest` envelope with `action: "reject"` and an `encrypted_payload` containing an `InnerResponsePayload` with empty `file_key`. The plugin decrypts and verifies the outer hash. Sent when no identity can unwrap the stanzas.
 
 #### Heartbeat comments
 
@@ -242,9 +265,10 @@ The plugin reads the stream line by line:
 3. `data: <json>` → accumulates event data
 4. Empty line → dispatches the event:
    - `event: result` → parse `RelayRequest` envelope, extract file key
+   - `event: reject` → parse `RelayRequest` envelope, return reject error
    - `event: error` → parse `RelayResponse`, return error
    - Unknown event type → ignored (forward compatibility)
-5. Stream ends without result/error → error
+5. Stream ends without result/reject/error → error
 
 ---
 
@@ -307,10 +331,10 @@ After receiving the request:
 7. Recompute `SHA-256("1.unwrap." + stream + "." + intent_id + "." + tag + "." + expires_at)` where `stream` is `"0"` or `"1"`.
 8. Compare against `outer_hash` — mismatch = reject.
 9. Decode stanzas from inner payload.
-10. Try each local identity: `identity.Unwrap(stanzas)` → file key.
+10. Try each local identity: `identity.Unwrap(stanzas)` → file key. If no identity succeeds → build `InnerResponsePayload{nonce, outer_hash, file_key:""}` where `outer_hash = SHA-256("1.reject." + intent_id)`, seal to ephemeral key, return `RelayRequest{version:1, action:"reject", intent_id, encrypted_payload}` as JSON (HTTP 200) or SSE `reject` event.
 11. Build `InnerResponsePayload`: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("1.fulfill." + intent_id)`.
 12. `age.Encrypt(inner_response, ephemeral_key)` → sealed `encrypted_payload`.
-13. Return `RelayRequest` envelope as JSON or SSE `result` event.
+13. Return `RelayRequest` envelope as JSON (HTTP 200) or SSE `result` event.
 
 ---
 
@@ -318,16 +342,17 @@ After receiving the request:
 
 | Status | Condition | Body |
 |---|---|---|
-| 200 OK | Unwrap succeeded (JSON mode) | `{"encrypted_payload": "..."}` |
-| 200 OK | Unwrap succeeded (SSE mode) | `event: result\ndata: {"encrypted_payload": "..."}` |
+| 200 OK | Unwrap succeeded (JSON mode) | `{"version":1,"action":"fulfill","intent_id":"...","encrypted_payload":"..."}` |
+| 200 OK | No identity could unwrap (JSON mode) | `{"version":1,"action":"reject","intent_id":"...","encrypted_payload":"..."}` |
+| 200 OK | Unwrap succeeded (SSE mode) | `event: result\ndata: {"version":1,"action":"fulfill",...}` |
+| 200 OK | No identity could unwrap (SSE mode) | `event: reject\ndata: {"version":1,"action":"reject",...}` |
 | 200 OK | Unwrap failed (SSE mode) | `event: error\ndata: {"error": "..."}` |
 | 400 | Invalid JSON, bad version, bad action, missing field, decrypt/verify failure | `{"error": "..."}` |
 | 401 | Auth token missing or wrong | `{"error": "unauthorized"}` |
-| 404 | No identity could unwrap | `{"error": "no_matching_identity"}` |
 | 405 | Non-POST method | `{"error": "method not allowed"}` |
 | 500 | Internal: payload build or seal failure | `{"error": "..."}` |
 
-Note: In SSE mode, the HTTP status is always `200 OK`. Both success and error are delivered as SSE events (`result` or `error`). The plugin distinguishes them by event type, not status code.
+Note: In SSE mode, the HTTP status is always `200 OK`. Success, reject, and error are delivered as SSE events (`result`, `reject`, or `error`). The plugin distinguishes them by event type, not status code.
 
 ---
 

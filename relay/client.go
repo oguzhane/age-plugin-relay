@@ -280,6 +280,11 @@ func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair, intentID
 		return nil, fmt.Errorf("decoding relay response: %w", err)
 	}
 
+	// Reject: decrypt and verify outer hash, then return reject error.
+	if envelope.Action == "reject" {
+		return nil, verifyReject(envelope, ephemeral, intentID)
+	}
+
 	return extractFileKey(RelayResponse{EncryptedPayload: envelope.EncryptedPayload}, ephemeral, envelope.Version, envelope.Action, intentID)
 }
 
@@ -304,6 +309,23 @@ func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, version int
 		return nil, fmt.Errorf("decoding file key from response: %w", err)
 	}
 	return fileKey, nil
+}
+
+// verifyReject decrypts a reject envelope's encrypted_payload, verifies the
+// outer hash, and returns a reject error. This ensures the reject is authentic
+// (not forged by a broker or MITM).
+func verifyReject(envelope RelayRequest, ephemeral *EphemeralKeypair, intentID string) error {
+	if envelope.EncryptedPayload == "" {
+		return fmt.Errorf("reject response contains no encrypted_payload")
+	}
+	inner, err := OpenResponse(envelope.EncryptedPayload, ephemeral.Identity)
+	if err != nil {
+		return fmt.Errorf("opening reject payload: %w", err)
+	}
+	if err := VerifyResponsePayload(inner, envelope.Version, "reject", intentID); err != nil {
+		return fmt.Errorf("verifying reject payload: %w", err)
+	}
+	return fmt.Errorf("sync intent %s: rejected (no matching identity)", intentID)
 }
 
 // readSSEResponse parses a Server-Sent Events stream, looking for a "result"
@@ -389,6 +411,13 @@ func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair, intentI
 			return nil, true, fmt.Errorf("relay SSE error (unparseable)")
 		}
 		return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
+
+	case "reject":
+		var envelope RelayRequest
+		if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+			return nil, true, fmt.Errorf("relay SSE reject (unparseable)")
+		}
+		return nil, true, verifyReject(envelope, ephemeral, intentID)
 
 	default:
 		// Unknown event type — ignore (forward compat).

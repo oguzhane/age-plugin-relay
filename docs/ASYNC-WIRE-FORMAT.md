@@ -344,6 +344,27 @@ data: {"version":1,"action":"fulfill","intent_id":"a3f1...","encrypted_payload":
 }
 ```
 
+### Sync reject response — 200 OK (JSON)
+
+```json
+{
+  "version": 1,
+  "action": "reject",
+  "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
+  "encrypted_payload": "<base64: age-encrypted InnerResponsePayload with empty file_key>"
+}
+```
+
+### Sync reject response — 200 OK (SSE)
+
+```
+event: reject
+data: {"version":1,"action":"reject","intent_id":"a3f1...","encrypted_payload":"<base64>"}
+
+```
+
+The sync reject response uses the same `RelayRequest` envelope shape as fulfill, with `action: "reject"` and an `encrypted_payload` containing `InnerResponsePayload{nonce, outer_hash, file_key:""}`. The plugin decrypts and verifies the outer hash `SHA-256("{version}.reject.{intent_id}")` to confirm authenticity.
+
 ---
 
 ## Go Types

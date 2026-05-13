@@ -340,7 +340,7 @@ data: {"version":1,"action":"fulfill","intent_id":"a3f1...","encrypted_payload":
 
 | HTTP Status | Body | Meaning |
 |---|---|---|
-| 404 | `{"error": "no_matching_identity"}` | No identity can unwrap these stanzas |
+| 200 | `{"version":1,"action":"reject","intent_id":"...","encrypted_payload":"..."}` | No identity can unwrap (reject with outer hash verification) |
 | 408 | `{"error": "timeout"}` | Identity interaction timed out (e.g., YubiKey not touched) |
 | 503 | `{"error": "unavailable"}` | Relay can't reach the identity |
 

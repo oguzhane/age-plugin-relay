@@ -197,10 +197,23 @@ func main() {
 		}
 
 		fmt.Fprintf(os.Stderr, "[relay-server] No identity could unwrap the stanzas\n")
+
+		// Build reject response with encrypted payload (outer hash verification).
+		rejectInner, err := relay.BuildResponsePayload(1, "reject", req.IntentID, nil)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "building reject payload"})
+			return
+		}
+		rejectSealed, err := relay.SealResponse(*rejectInner, inner.EphemeralKey)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "sealing reject response"})
+			return
+		}
+		rejectResp := relay.RelayRequest{Version: 1, Action: "reject", IntentID: req.IntentID, EncryptedPayload: rejectSealed}
 		if req.Stream {
-			writeSSE(w, "error", relay.RelayResponse{Error: "no_matching_identity"})
+			writeSSE(w, "reject", rejectResp)
 		} else {
-			writeJSON(w, http.StatusNotFound, relay.RelayResponse{Error: "no_matching_identity"})
+			writeJSON(w, http.StatusOK, rejectResp)
 		}
 	})
 
