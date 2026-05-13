@@ -36,7 +36,12 @@ type asyncPollResponse struct {
 	Error    string          `json:"error,omitempty"`
 }
 
-// RelayRequest is the JSON body sent to the relay endpoint.
+// RelayRequest is the JSON envelope for all relay protocol messages.
+//
+// IMPORTANT — Complete Outer Field Binding: Every field in this struct except
+// EncryptedPayload is included in the outer hash (computed inside the encrypted
+// payload). If you add a new field, you MUST also add it to OuterHashRequest
+// and/or OuterHashResponse in payload.go. See ARCHITECTURE.md §3.5.
 type RelayRequest struct {
 	Version          int    `json:"version"`
 	Action           string `json:"action"`
