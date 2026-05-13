@@ -239,7 +239,7 @@ func pollForResult(client *http.Client, remote RemoteConfig, intentID, token str
 			continue
 		case "fulfilled":
 			if pollResp.EncryptedPayload != "" {
-				return extractFileKey(RelayResponse{EncryptedPayload: pollResp.EncryptedPayload}, ephemeral, intentID)
+				return extractFileKey(RelayResponse{EncryptedPayload: pollResp.EncryptedPayload}, ephemeral, "fulfill", intentID)
 			}
 			return nil, fmt.Errorf("async intent %s: fulfilled but no encrypted_payload", intentID)
 		case "rejected":
@@ -274,12 +274,12 @@ func readJSONResponse(resp *http.Response, ephemeral *EphemeralKeypair, intentID
 		return nil, fmt.Errorf("relay error: %s", sanitizeErrorMsg(relayResp.Error))
 	}
 
-	return extractFileKey(relayResp, ephemeral, intentID)
+	return extractFileKey(relayResp, ephemeral, "unwrap", intentID)
 }
 
 // extractFileKey opens the age-encrypted response, verifies the outer hash,
 // and returns the file key.
-func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, intentID string) ([]byte, error) {
+func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, action, intentID string) ([]byte, error) {
 	if resp.EncryptedPayload == "" {
 		return nil, fmt.Errorf("relay response contains no encrypted_payload")
 	}
@@ -289,7 +289,7 @@ func extractFileKey(resp RelayResponse, ephemeral *EphemeralKeypair, intentID st
 		return nil, fmt.Errorf("opening sealed response: %w", err)
 	}
 
-	if err := VerifyResponsePayload(inner, intentID); err != nil {
+	if err := VerifyResponsePayload(inner, action, intentID); err != nil {
 		return nil, fmt.Errorf("verifying response payload: %w", err)
 	}
 
@@ -374,7 +374,7 @@ func handleSSEEvent(eventType, data string, ephemeral *EphemeralKeypair, intentI
 		if resp.Error != "" {
 			return nil, true, fmt.Errorf("relay error: %s", sanitizeErrorMsg(resp.Error))
 		}
-		fileKey, err := extractFileKey(resp, ephemeral, intentID)
+		fileKey, err := extractFileKey(resp, ephemeral, "unwrap", intentID)
 		if err != nil {
 			return nil, false, fmt.Errorf("extracting file key from SSE: %w", err)
 		}

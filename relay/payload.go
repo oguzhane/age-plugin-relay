@@ -39,7 +39,7 @@ type InnerRequestPayload struct {
 // back to the plugin. It contains the unwrapped file key and integrity fields.
 type InnerResponsePayload struct {
 	Nonce     string `json:"nonce"`      // 16 random bytes, hex-encoded
-	OuterHash string `json:"outer_hash"` // SHA-256 of intent_id
+	OuterHash string `json:"outer_hash"` // SHA-256 of action.intent_id
 	FileKey   string `json:"file_key"`   // base64 raw standard, 16-byte age file key
 }
 
@@ -56,9 +56,11 @@ func OuterHashRequest(version int, action, intentID, tag string, expiresAt int64
 }
 
 // OuterHashResponse computes the SHA-256 hash that binds the encrypted response
-// payload to the intent. The canonical input is simply the intent_id.
-func OuterHashResponse(intentID string) string {
-	h := sha256.Sum256([]byte(intentID))
+// payload to the action and intent. The canonical input is:
+//
+//	"{action}.{intent_id}"
+func OuterHashResponse(action, intentID string) string {
+	h := sha256.Sum256([]byte(action + "." + intentID))
 	return hex.EncodeToString(h[:])
 }
 
@@ -156,22 +158,22 @@ func BuildRequestPayload(version int, action, intentID, tag string, expiresAt in
 
 // BuildResponsePayload constructs an InnerResponsePayload with a fresh nonce,
 // the computed outer hash, and the base64-encoded file key.
-func BuildResponsePayload(intentID string, fileKey []byte) (*InnerResponsePayload, error) {
+func BuildResponsePayload(action, intentID string, fileKey []byte) (*InnerResponsePayload, error) {
 	nonce, err := generateNonce()
 	if err != nil {
 		return nil, err
 	}
 	return &InnerResponsePayload{
 		Nonce:     nonce,
-		OuterHash: OuterHashResponse(intentID),
+		OuterHash: OuterHashResponse(action, intentID),
 		FileKey:   base64.RawStdEncoding.EncodeToString(fileKey),
 	}, nil
 }
 
 // VerifyResponsePayload checks that the inner response payload's outer_hash
 // matches the recomputed hash from the intent_id.
-func VerifyResponsePayload(inner *InnerResponsePayload, intentID string) error {
-	expected := OuterHashResponse(intentID)
+func VerifyResponsePayload(inner *InnerResponsePayload, action, intentID string) error {
+	expected := OuterHashResponse(action, intentID)
 	if inner.OuterHash != expected {
 		return fmt.Errorf("response outer_hash mismatch: possible tampering")
 	}

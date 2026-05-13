@@ -52,13 +52,13 @@ func TestOuterHashRequestDifferentFields(t *testing.T) {
 }
 
 func TestOuterHashResponseDeterminism(t *testing.T) {
-	h1 := relay.OuterHashResponse("abc123")
-	h2 := relay.OuterHashResponse("abc123")
+	h1 := relay.OuterHashResponse("unwrap", "abc123")
+	h2 := relay.OuterHashResponse("unwrap", "abc123")
 	if h1 != h2 {
 		t.Fatalf("expected deterministic hash, got %q != %q", h1, h2)
 	}
 
-	expected := sha256.Sum256([]byte("abc123"))
+	expected := sha256.Sum256([]byte("unwrap.abc123"))
 	expectedHex := hex.EncodeToString(expected[:])
 	if h1 != expectedHex {
 		t.Fatalf("expected %q, got %q", expectedHex, h1)
@@ -166,18 +166,18 @@ func TestVerifyRequestPayloadExpired(t *testing.T) {
 
 func TestVerifyResponsePayloadValid(t *testing.T) {
 	inner := &relay.InnerResponsePayload{
-		OuterHash: relay.OuterHashResponse("intent1"),
+		OuterHash: relay.OuterHashResponse("unwrap", "intent1"),
 	}
-	if err := relay.VerifyResponsePayload(inner, "intent1"); err != nil {
+	if err := relay.VerifyResponsePayload(inner, "unwrap", "intent1"); err != nil {
 		t.Fatalf("expected valid, got: %v", err)
 	}
 }
 
 func TestVerifyResponsePayloadTamperedHash(t *testing.T) {
 	inner := &relay.InnerResponsePayload{
-		OuterHash: relay.OuterHashResponse("intent1"),
+		OuterHash: relay.OuterHashResponse("unwrap", "intent1"),
 	}
-	err := relay.VerifyResponsePayload(inner, "different_intent")
+	err := relay.VerifyResponsePayload(inner, "unwrap", "different_intent")
 	if err == nil {
 		t.Fatal("expected error for tampered intent_id")
 	}
@@ -209,7 +209,7 @@ func TestBuildRequestPayload(t *testing.T) {
 func TestBuildResponsePayload(t *testing.T) {
 	fileKey := []byte("0123456789abcdef") // 16 bytes
 
-	inner, err := relay.BuildResponsePayload("intent1", fileKey)
+	inner, err := relay.BuildResponsePayload("unwrap", "intent1", fileKey)
 	if err != nil {
 		t.Fatalf("BuildResponsePayload: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestBuildResponsePayload(t *testing.T) {
 	if inner.Nonce == "" || len(inner.Nonce) != 32 {
 		t.Errorf("expected 32-char hex nonce, got %q", inner.Nonce)
 	}
-	if inner.OuterHash != relay.OuterHashResponse("intent1") {
+	if inner.OuterHash != relay.OuterHashResponse("unwrap", "intent1") {
 		t.Error("outer_hash mismatch")
 	}
 
@@ -297,12 +297,12 @@ func TestResponsePayloadFullFlow(t *testing.T) {
 	intentID := "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c"
 	fileKey := []byte("0123456789abcdef")
 
-	inner, err := relay.BuildResponsePayload(intentID, fileKey)
+	inner, err := relay.BuildResponsePayload("unwrap", intentID, fileKey)
 	if err != nil {
 		t.Fatalf("BuildResponsePayload: %v", err)
 	}
 
-	if err := relay.VerifyResponsePayload(inner, intentID); err != nil {
+	if err := relay.VerifyResponsePayload(inner, "unwrap", intentID); err != nil {
 		t.Fatalf("VerifyResponsePayload: %v", err)
 	}
 

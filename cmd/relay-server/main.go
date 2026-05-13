@@ -171,7 +171,7 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[relay-server] Unwrap succeeded, sealing response\n")
 
 				// 5. Build response inner payload.
-				respInner, err := relay.BuildResponsePayload(req.IntentID, fileKey)
+				respInner, err := relay.BuildResponsePayload("unwrap", req.IntentID, fileKey)
 				clear(fileKey)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, relay.RelayResponse{Error: "building response payload"})

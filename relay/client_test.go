@@ -86,7 +86,7 @@ func TestSanitizeErrorMsgEmpty(t *testing.T) {
 
 func TestExtractFileKeyEmpty(t *testing.T) {
 	ek, _ := GenerateEphemeral()
-	_, err := extractFileKey(RelayResponse{}, ek, "some-intent")
+	_, err := extractFileKey(RelayResponse{}, ek, "unwrap", "some-intent")
 	if err == nil {
 		t.Fatal("expected error for empty response")
 	}
@@ -95,7 +95,7 @@ func TestExtractFileKeyEmpty(t *testing.T) {
 func TestExtractFileKeyBadBase64(t *testing.T) {
 	ek, _ := GenerateEphemeral()
 	resp := RelayResponse{EncryptedPayload: "not-valid-base64!!!"}
-	_, err := extractFileKey(resp, ek, "intent123")
+	_, err := extractFileKey(resp, ek, "unwrap", "intent123")
 	if err == nil {
 		t.Fatal("expected error for bad base64")
 	}
@@ -106,13 +106,13 @@ func TestExtractFileKeyWrongKey(t *testing.T) {
 	fileKey := make([]byte, 16)
 	rand.Read(fileKey)
 
-	respInner, _ := BuildResponsePayload(intentID, fileKey)
+	respInner, _ := BuildResponsePayload("unwrap", intentID, fileKey)
 	ek1, _ := GenerateEphemeral()
 	sealed, _ := SealResponse(*respInner, ek1.RecipientString())
 
 	ek2, _ := GenerateEphemeral()
 	resp := RelayResponse{EncryptedPayload: sealed}
-	_, err := extractFileKey(resp, ek2, intentID)
+	_, err := extractFileKey(resp, ek2, "unwrap", intentID)
 	if err == nil {
 		t.Fatal("expected error for wrong key")
 	}
@@ -122,12 +122,12 @@ func TestExtractFileKeyWrongIntentID(t *testing.T) {
 	fileKey := make([]byte, 16)
 	rand.Read(fileKey)
 
-	respInner, _ := BuildResponsePayload("intent-A", fileKey)
+	respInner, _ := BuildResponsePayload("unwrap", "intent-A", fileKey)
 	ek, _ := GenerateEphemeral()
 	sealed, _ := SealResponse(*respInner, ek.RecipientString())
 
 	resp := RelayResponse{EncryptedPayload: sealed}
-	_, err := extractFileKey(resp, ek, "intent-B")
+	_, err := extractFileKey(resp, ek, "unwrap", "intent-B")
 	if err == nil {
 		t.Fatal("expected error for wrong intent_id (outer_hash mismatch)")
 	}
@@ -143,12 +143,12 @@ func TestFileKeyRecoveryVariousSizes(t *testing.T) {
 			rand.Read(fileKey)
 			intentID := "test-intent"
 
-			respInner, _ := BuildResponsePayload(intentID, fileKey)
+			respInner, _ := BuildResponsePayload("unwrap", intentID, fileKey)
 			ek, _ := GenerateEphemeral()
 			sealed, _ := SealResponse(*respInner, ek.RecipientString())
 
 			resp := RelayResponse{EncryptedPayload: sealed}
-			recovered, err := extractFileKey(resp, ek, intentID)
+			recovered, err := extractFileKey(resp, ek, "unwrap", intentID)
 			if err != nil {
 				t.Fatalf("size %d: %v", size, err)
 			}
@@ -457,7 +457,7 @@ func TestEncryptedPayloadAsyncE2E(t *testing.T) {
 	}
 	unwrappedKey, _ := identity.Unwrap(opStanzas)
 
-	respInner, _ := BuildResponsePayload(reqCopy.IntentID, unwrappedKey)
+	respInner, _ := BuildResponsePayload("fulfill", reqCopy.IntentID, unwrappedKey)
 	sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
 	mu.Lock()

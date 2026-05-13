@@ -347,7 +347,7 @@ func TestBrokerBlindnessVerification(t *testing.T) {
 			stanzas[i] = &age.Stanza{Type: s.Type, Args: s.Args, Body: body}
 		}
 		fileKey, _ := identity.Unwrap(stanzas)
-		respInner, _ := BuildResponsePayload(req.IntentID, fileKey)
+		respInner, _ := BuildResponsePayload("unwrap", req.IntentID, fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 		json.NewEncoder(w).Encode(RelayResponse{EncryptedPayload: sealed})
 	}))
@@ -405,7 +405,7 @@ func TestResponseOuterHashTamperingE2E(t *testing.T) {
 		fileKey, _ := identity.Unwrap(stanzas)
 
 		// Build response with WRONG intent_id
-		respInner, _ := BuildResponsePayload("wrong-intent-id", fileKey)
+		respInner, _ := BuildResponsePayload("unwrap", "wrong-intent-id", fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 		json.NewEncoder(w).Encode(RelayResponse{EncryptedPayload: sealed})
 	}))

@@ -59,7 +59,7 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		}
 
 		// Build and seal response.
-		respInner, _ := BuildResponsePayload(req.IntentID, fileKey)
+		respInner, _ := BuildResponsePayload("unwrap", req.IntentID, fileKey)
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
 		resp := RelayResponse{EncryptedPayload: sealed}

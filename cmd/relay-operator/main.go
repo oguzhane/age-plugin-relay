@@ -156,7 +156,7 @@ func main() {
 			}
 
 			// 4. Build response payload and seal with age encryption to plugin's ephemeral recipient.
-			respInner, err := relay.BuildResponsePayload(intent.IntentID, fileKey)
+			respInner, err := relay.BuildResponsePayload("fulfill", intent.IntentID, fileKey)
 			clear(fileKey)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Build response error: %v — rejecting\n", err)

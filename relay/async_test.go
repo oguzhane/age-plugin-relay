@@ -225,7 +225,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	t.Log("Operator unwrapped file key")
 
 	// Operator seals response to plugin's ephemeral recipient.
-	respInner, _ := relay.BuildResponsePayload(intentID, recoveredFileKey)
+	respInner, _ := relay.BuildResponsePayload("fulfill", intentID, recoveredFileKey)
 	sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 	if err != nil {
 		t.Fatalf("Operator seal failed: %v", err)
@@ -265,7 +265,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plugin decrypt failed: %v", err)
 	}
-	if err := relay.VerifyResponsePayload(respPayload, intentID); err != nil {
+	if err := relay.VerifyResponsePayload(respPayload, "fulfill", intentID); err != nil {
 		t.Fatalf("Plugin response verification failed: %v", err)
 	}
 	decryptedFileKey, err := base64.RawStdEncoding.DecodeString(respPayload.FileKey)
@@ -537,7 +537,7 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	}
 
 	// Operator seals response to plugin's ephemeral recipient.
-	respInner, _ := relay.BuildResponsePayload(intent.IntentID, opFileKey)
+	respInner, _ := relay.BuildResponsePayload("fulfill", intent.IntentID, opFileKey)
 	sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 	if err != nil {
 		t.Fatal(err)
@@ -727,7 +727,7 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	}
 	opFileKey, _ := operatorIdentity.Unwrap(ageStanzas)
 
-	respInner, _ := relay.BuildResponsePayload(intentID, opFileKey)
+	respInner, _ := relay.BuildResponsePayload("fulfill", intentID, opFileKey)
 	sealed, _ := relay.SealResponse(*respInner, inner.EphemeralKey)
 
 	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
