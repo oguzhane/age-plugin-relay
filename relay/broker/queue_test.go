@@ -22,13 +22,17 @@ func TestSubmitAndPoll(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	pubKey, _ := testClaimKeypair(t)
+	pubKey, priv := testClaimKeypair(t)
 	err := q.Submit("intent-1", "tag-a", []byte(`{"test":true}`), pubKey)
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	resp := q.Poll("intent-1")
+	sig := relay.SignIntentClaim(priv, 1, "poll", "intent-1", "")
+	resp, err := q.PollWithClaim("intent-1", sig, 1)
+	if err != nil {
+		t.Fatalf("PollWithClaim: %v", err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil poll response")
 	}
@@ -58,13 +62,18 @@ func TestSubmitDuplicateReturnsError(t *testing.T) {
 	}
 }
 
-func TestPollUnknownReturnsNil(t *testing.T) {
+func TestPollUnknownReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	resp := q.Poll("nonexistent")
-	if resp != nil {
-		t.Fatal("expected nil for unknown intent_id")
+	_, priv := testClaimKeypair(t)
+	sig := relay.SignIntentClaim(priv, 1, "poll", "nonexistent", "")
+	_, err := q.PollWithClaim("nonexistent", sig, 1)
+	if err == nil {
+		t.Fatal("expected error for unknown intent_id")
+	}
+	if err.Error() != "unknown_intent" {
+		t.Fatalf("expected unknown_intent, got: %v", err)
 	}
 }
 
@@ -82,7 +91,11 @@ func TestFulfillAndPoll(t *testing.T) {
 		t.Fatalf("Fulfill: %v", err)
 	}
 
-	resp := q.Poll("intent-f")
+	pollSig := relay.SignIntentClaim(priv, 1, "poll", "intent-f", "")
+	resp, pollErr := q.PollWithClaim("intent-f", pollSig, 1)
+	if pollErr != nil {
+		t.Fatalf("PollWithClaim: %v", pollErr)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response after fulfill")
 	}
@@ -113,7 +126,11 @@ func TestRejectAndPoll(t *testing.T) {
 		t.Fatalf("Reject: %v", err)
 	}
 
-	resp := q.Poll("intent-r")
+	pollSig := relay.SignIntentClaim(priv, 1, "poll", "intent-r", "")
+	resp, pollErr := q.PollWithClaim("intent-r", pollSig, 1)
+	if pollErr != nil {
+		t.Fatalf("PollWithClaim: %v", pollErr)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response after reject")
 	}
@@ -243,19 +260,23 @@ func TestTTLExpiresIntents(t *testing.T) {
 	q := NewQueue(50*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	pubKey, _ := testClaimKeypair(t)
+	pubKey, priv := testClaimKeypair(t)
 	q.Submit("expire-1", "tag-a", []byte(`{}`), pubKey)
 
-	resp := q.Poll("expire-1")
-	if resp == nil || resp.Status != "pending" {
+	sig := relay.SignIntentClaim(priv, 1, "poll", "expire-1", "")
+	resp, err := q.PollWithClaim("expire-1", sig, 1)
+	if err != nil || resp == nil || resp.Status != "pending" {
 		t.Fatal("expected pending immediately after submit")
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
-	resp = q.Poll("expire-1")
-	if resp != nil {
-		t.Fatalf("expected nil after TTL expiry, got status=%s", resp.Status)
+	_, err = q.PollWithClaim("expire-1", sig, 1)
+	if err == nil {
+		t.Fatal("expected error after TTL expiry")
+	}
+	if err.Error() != "unknown_intent" {
+		t.Fatalf("expected unknown_intent, got: %v", err)
 	}
 }
 
@@ -314,38 +335,23 @@ func TestSweepCleansExpiredIntents(t *testing.T) {
 	q := NewQueue(30*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	pubKey, _ := testClaimKeypair(t)
+	pubKey, priv := testClaimKeypair(t)
 	q.Submit("sweep-1", "tag-a", []byte(`{}`), pubKey)
 	q.Submit("sweep-2", "tag-a", []byte(`{}`), pubKey)
 
 	time.Sleep(80 * time.Millisecond)
 
-	if resp := q.Poll("sweep-1"); resp != nil {
+	sig1 := relay.SignIntentClaim(priv, 1, "poll", "sweep-1", "")
+	if _, err := q.PollWithClaim("sweep-1", sig1, 1); err == nil {
 		t.Fatal("expected sweep-1 to be cleaned up")
 	}
-	if resp := q.Poll("sweep-2"); resp != nil {
+	sig2 := relay.SignIntentClaim(priv, 1, "poll", "sweep-2", "")
+	if _, err := q.PollWithClaim("sweep-2", sig2, 1); err == nil {
 		t.Fatal("expected sweep-2 to be cleaned up")
 	}
 
 	if err := q.Submit("sweep-1", "tag-a", []byte(`{}`), pubKey); err != nil {
 		t.Fatalf("re-submit after sweep: %v", err)
-	}
-}
-
-func TestPollWithClaimValid(t *testing.T) {
-	q := NewQueue(1*time.Minute, 30*time.Second)
-	defer q.Stop()
-
-	pubKey, priv := testClaimKeypair(t)
-	q.Submit("claim-poll-1", "tag-a", []byte(`{}`), pubKey)
-
-	sig := relay.SignIntentClaim(priv, 1, "poll", "claim-poll-1", "")
-	resp, err := q.PollWithClaim("claim-poll-1", sig, 1)
-	if err != nil {
-		t.Fatalf("PollWithClaim: %v", err)
-	}
-	if resp.Status != "pending" {
-		t.Fatalf("expected pending, got %s", resp.Status)
 	}
 }
 
@@ -378,38 +384,6 @@ func TestPollWithClaimMissingSig(t *testing.T) {
 	_, err := q.PollWithClaim("claim-poll-3", "", 1)
 	if err == nil {
 		t.Fatal("expected error for empty sig")
-	}
-}
-
-func TestPollWithClaimUnknownIntent(t *testing.T) {
-	q := NewQueue(1*time.Minute, 30*time.Second)
-	defer q.Stop()
-
-	_, err := q.PollWithClaim("nonexistent", "dummy-sig", 1)
-	if err == nil {
-		t.Fatal("expected error for unknown intent")
-	}
-	if err.Error() != "unknown_intent" {
-		t.Fatalf("expected unknown_intent, got: %v", err)
-	}
-}
-
-func TestPollWithClaimExpiredIntent(t *testing.T) {
-	q := NewQueue(50*time.Millisecond, 10*time.Millisecond)
-	defer q.Stop()
-
-	pubKey, priv := testClaimKeypair(t)
-	q.Submit("claim-poll-exp", "tag-a", []byte(`{}`), pubKey)
-
-	time.Sleep(100 * time.Millisecond)
-
-	sig := relay.SignIntentClaim(priv, 1, "poll", "claim-poll-exp", "")
-	_, err := q.PollWithClaim("claim-poll-exp", sig, 1)
-	if err == nil {
-		t.Fatal("expected error for expired intent")
-	}
-	if err.Error() != "unknown_intent" {
-		t.Fatalf("expected unknown_intent, got: %v", err)
 	}
 }
 
