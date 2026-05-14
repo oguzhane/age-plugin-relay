@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -124,12 +125,23 @@ func main() {
 			}
 
 			// 2. Verify outer hash and expiry.
-			if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+			if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, authToken); err != nil {
+				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, nil, authToken); err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
 				}
 				continue
+			}
+
+			// 2b. Extract intent claim secret for signing fulfill/reject.
+			var claimPriv ed25519.PrivateKey
+			if inner.IntentClaimSecret != "" {
+				priv, err := relay.DecodeIntentClaimSecret(inner.IntentClaimSecret)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid intent claim secret: %v — skipping\n", err)
+					continue
+				}
+				claimPriv = priv
 			}
 
 			// 3. Convert stanzas and attempt unwrap.
@@ -156,7 +168,7 @@ func main() {
 			}
 			if fileKey == nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   No identity could unwrap — rejecting\n")
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, authToken); err != nil {
+				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
 				}
 				continue
@@ -167,7 +179,7 @@ func main() {
 			clear(fileKey)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Build response error: %v — rejecting\n", err)
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, authToken); err != nil {
+				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
 				}
 				continue
@@ -176,14 +188,14 @@ func main() {
 			sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Seal error: %v — rejecting\n", err)
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, authToken); err != nil {
+				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
 					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
 				}
 				continue
 			}
 
 			// 6. Fulfill the intent.
-			if err := fulfillIntent(brokerURL, intent.IntentID, sealed, authToken); err != nil {
+			if err := fulfillIntent(brokerURL, intent.IntentID, sealed, claimPriv, authToken); err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Fulfill error: %v\n", err)
 				continue
 			}
@@ -203,18 +215,23 @@ func pullIntents(brokerURL, tag, authToken string) (*broker.PullResponse, error)
 	return doRequest[broker.PullResponse](brokerURL, req, authToken)
 }
 
-func fulfillIntent(brokerURL, intentID, encryptedPayload, authToken string) error {
+func fulfillIntent(brokerURL, intentID, encryptedPayload string, claimPriv ed25519.PrivateKey, authToken string) error {
+	var claimSig string
+	if claimPriv != nil {
+		claimSig = relay.SignIntentClaim(claimPriv, 1, "fulfill", intentID, encryptedPayload)
+	}
 	req := relay.RelayRequest{
 		Version:          1,
 		Action:           "fulfill",
 		IntentID:         intentID,
+		IntentClaimSig:   claimSig,
 		EncryptedPayload: encryptedPayload,
 	}
 	_, err := doRequest[map[string]string](brokerURL, req, authToken)
 	return err
 }
 
-func rejectIntent(brokerURL, intentID, ephemeralKey, authToken string) error {
+func rejectIntent(brokerURL, intentID, ephemeralKey string, claimPriv ed25519.PrivateKey, authToken string) error {
 	// Build reject inner payload with outer hash (empty file_key).
 	respInner, err := relay.BuildResponsePayload(1, "reject", intentID, nil)
 	if err != nil {
@@ -224,10 +241,15 @@ func rejectIntent(brokerURL, intentID, ephemeralKey, authToken string) error {
 	if err != nil {
 		return fmt.Errorf("sealing reject payload: %w", err)
 	}
+	var claimSig string
+	if claimPriv != nil {
+		claimSig = relay.SignIntentClaim(claimPriv, 1, "reject", intentID, sealed)
+	}
 	req := relay.RelayRequest{
 		Version:          1,
 		Action:           "reject",
 		IntentID:         intentID,
+		IntentClaimSig:   claimSig,
 		EncryptedPayload: sealed,
 	}
 	_, err = doRequest[map[string]string](brokerURL, req, authToken)

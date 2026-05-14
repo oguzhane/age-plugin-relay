@@ -453,7 +453,7 @@ func TestEncryptedPayloadAsyncE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("operator decrypt: %v", err)
 	}
-	if err := VerifyRequestPayload(inner, reqCopy.Version, reqCopy.Action, reqCopy.Stream, reqCopy.IntentID, reqCopy.Tag, reqCopy.ExpiresAt); err != nil {
+	if err := VerifyRequestPayload(inner, reqCopy.Version, reqCopy.Action, reqCopy.Stream, reqCopy.IntentID, reqCopy.Tag, reqCopy.ExpiresAt, reqCopy.IntentClaimPub); err != nil {
 		t.Fatalf("operator verify: %v", err)
 	}
 

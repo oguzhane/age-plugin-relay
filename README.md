@@ -169,3 +169,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete technical refe
 - Security model and threat analysis
 - Relay server, broker, and operator configuration
 - Code architecture and test matrix
+
+### Security
+
+- All payloads are encrypted end-to-end using `age.Encrypt`/`age.Decrypt`.
+- Outer hash binding detects tampering of cleartext routing fields.
+- **Intent Claim**: per-intent Ed25519 authorization prevents fabricated fulfill/reject actions in the async flow. See [docs/INTENT-CLAIM.md](docs/INTENT-CLAIM.md).

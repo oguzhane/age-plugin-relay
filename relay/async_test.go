@@ -43,7 +43,7 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "unwrap":
-		if err := b.queue.Submit(req.IntentID, req.Tag, body); err != nil {
+		if err := b.queue.Submit(req.IntentID, req.Tag, body, req.IntentClaimPub); err != nil {
 			if err.Error() == "duplicate_intent" {
 				writeAsyncTestJSON(w, http.StatusConflict, map[string]string{"error": "duplicate_intent"})
 				return
@@ -56,9 +56,18 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(broker.AsyncAccepted{})
 
 	case "poll":
-		resp := b.queue.Poll(req.IntentID)
-		if resp == nil {
-			writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
+		if req.IntentClaimSig == "" {
+			writeAsyncTestJSON(w, http.StatusBadRequest, map[string]string{"error": "missing intent_claim_sig"})
+			return
+		}
+		resp, err := b.queue.PollWithClaim(req.IntentID, req.IntentClaimSig, req.Version)
+		if err != nil {
+			errMsg := err.Error()
+			if errMsg == "unknown_intent" {
+				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": errMsg})
+			} else {
+				writeAsyncTestJSON(w, http.StatusForbidden, map[string]string{"error": errMsg})
+			}
 			return
 		}
 		writeAsyncTestJSON(w, http.StatusOK, resp)
@@ -68,9 +77,11 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsyncTestJSON(w, http.StatusOK, resp)
 
 	case "fulfill":
-		if err := b.queue.Fulfill(req.IntentID, body); err != nil {
+		if err := b.queue.Fulfill(req.IntentID, body, req.IntentClaimSig, req.Version, req.Action, req.EncryptedPayload); err != nil {
 			if err.Error() == "unknown_intent" {
 				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
+			} else if err.Error() == "invalid_claim_sig" {
+				writeAsyncTestJSON(w, http.StatusForbidden, map[string]string{"error": "invalid_claim_sig"})
 			} else {
 				writeAsyncTestJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			}
@@ -79,9 +90,11 @@ func (b *mockBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAsyncTestJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 
 	case "reject":
-		if err := b.queue.Reject(req.IntentID, body); err != nil {
+		if err := b.queue.Reject(req.IntentID, body, req.IntentClaimSig, req.Version, req.Action, req.EncryptedPayload); err != nil {
 			if err.Error() == "unknown_intent" {
 				writeAsyncTestJSON(w, http.StatusNotFound, map[string]string{"error": "unknown_intent"})
+			} else if err.Error() == "invalid_claim_sig" {
+				writeAsyncTestJSON(w, http.StatusForbidden, map[string]string{"error": "invalid_claim_sig"})
 			} else {
 				writeAsyncTestJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			}
@@ -149,11 +162,19 @@ func TestAsyncEndToEnd(t *testing.T) {
 
 	expiresAt := time.Now().Add(5 * time.Minute).Unix()
 
-	// Build and encrypt inner payload.
-	innerReq, err := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient)
+	// Generate intent claim keypair.
+	claimPub, claimPriv, err := relay.GenerateIntentClaim()
 	if err != nil {
 		t.Fatal(err)
 	}
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
+	// Build and encrypt inner payload.
+	innerReq, err := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient, claimPubB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	innerReq.IntentClaimSecret = relay.EncodeIntentClaimSecret(claimPriv)
 	encryptedPayload, err := relay.EncryptPayload(*innerReq, recipientStr)
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +187,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 		IntentID:         intentID,
 		Tag:              tag,
 		ExpiresAt:        expiresAt,
+		IntentClaimPub:   claimPubB64,
 		EncryptedPayload: encryptedPayload,
 	}
 	reqBody, _ := json.Marshal(relayReq)
@@ -213,7 +235,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	t.Log("Operator decrypted inner payload")
 
 	// Operator verifies outer hash.
-	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.Stream, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
+	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.Stream, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt, intentReq.IntentClaimPub); err != nil {
 		t.Fatalf("Operator verification failed: %v", err)
 	}
 	t.Log("Operator verified outer hash")
@@ -238,8 +260,15 @@ func TestAsyncEndToEnd(t *testing.T) {
 	}
 	t.Log("Operator sealed response")
 
+	// Operator extracts intent claim secret and signs the fulfill.
+	operatorClaimPriv, err := relay.DecodeIntentClaimSecret(inner.IntentClaimSecret)
+	if err != nil {
+		t.Fatalf("Operator decode claim secret: %v", err)
+	}
+	fulfillClaimSig := relay.SignIntentClaim(operatorClaimPriv, 1, "fulfill", intentID, sealed)
+
 	// Operator fulfills.
-	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
+	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, IntentClaimSig: fulfillClaimSig, EncryptedPayload: sealed}
 	fulfillBody, _ := json.Marshal(fulfillReq)
 	fulfillHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fulfillBody))
 	fulfillHTTP.Header.Set("Content-Type", "application/json")
@@ -250,8 +279,9 @@ func TestAsyncEndToEnd(t *testing.T) {
 	}
 	t.Log("Operator fulfilled")
 
-	// Plugin polls.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	// Plugin polls (authenticated with intent claim sig).
+	pollClaimSig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID, IntentClaimSig: pollClaimSig}
 	pollBody, _ := json.Marshal(pollReq)
 	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
 	pollHTTP.Header.Set("Content-Type", "application/json")
@@ -297,12 +327,20 @@ func TestAsyncRejectionFlow(t *testing.T) {
 
 	intentID := "reject-test-001"
 
+	// Generate intent claim keypair.
+	claimPub, claimPriv, err := relay.GenerateIntentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
 	// Submit an intent with encrypted payload.
 	req := relay.RelayRequest{
 		Version:          1,
 		Action:           "unwrap",
 		IntentID:         intentID,
 		Tag:              "test-tag",
+		IntentClaimPub:   claimPubB64,
 		EncryptedPayload: "opaque-encrypted-data",
 	}
 	body, _ := json.Marshal(req)
@@ -314,8 +352,9 @@ func TestAsyncRejectionFlow(t *testing.T) {
 		t.Fatalf("expected 202, got %d", resp.StatusCode)
 	}
 
-	// Operator rejects.
-	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: intentID, EncryptedPayload: "opaque-reject"}
+	// Operator rejects (with valid claim signature).
+	rejectClaimSig := relay.SignIntentClaim(claimPriv, 1, "reject", intentID, "opaque-reject")
+	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: intentID, IntentClaimSig: rejectClaimSig, EncryptedPayload: "opaque-reject"}
 	rejectBody, _ := json.Marshal(rejectReq)
 	rejectHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(rejectBody))
 	rejectHTTP.Header.Set("Content-Type", "application/json")
@@ -325,8 +364,9 @@ func TestAsyncRejectionFlow(t *testing.T) {
 		t.Fatalf("expected 200 on reject, got %d", rejectResp.StatusCode)
 	}
 
-	// Plugin polls and sees rejected.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	// Plugin polls and sees rejected (authenticated with intent claim sig).
+	pollClaimSig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID, IntentClaimSig: pollClaimSig}
 	pollBody, _ := json.Marshal(pollReq)
 	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
 	pollHTTP.Header.Set("Content-Type", "application/json")
@@ -349,11 +389,18 @@ func TestAsyncDuplicateIntentReturns409(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
+	claimPub, _, err := relay.GenerateIntentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
 	req := relay.RelayRequest{
 		Version:          1,
 		Action:           "unwrap",
 		IntentID:         "dup-409",
 		Tag:              "tag",
+		IntentClaimPub:   claimPubB64,
 		EncryptedPayload: "opaque",
 	}
 	body, _ := json.Marshal(req)
@@ -384,7 +431,10 @@ func TestAsyncPollUnknownReturns404(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	req := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "nonexistent"}
+	// Generate a dummy claim keypair to sign the poll (intent doesn't exist, so sig won't match anything).
+	_, dummyPriv, _ := relay.GenerateIntentClaim()
+	dummySig := relay.SignIntentClaim(dummyPriv, 1, "poll", "nonexistent", "")
+	req := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "nonexistent", IntentClaimSig: dummySig}
 	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -404,24 +454,33 @@ func TestAsyncFulfillAfterRejectReturns409(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
+	// Generate claim keypair.
+	claimPub, claimPriv, err := relay.GenerateIntentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
 	// Submit.
-	submit := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "terminal-test", Tag: "t", EncryptedPayload: "opaque"}
+	submit := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "terminal-test", Tag: "t", IntentClaimPub: claimPubB64, EncryptedPayload: "opaque"}
 	sb, _ := json.Marshal(submit)
 	sr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(sb))
 	sr.Header.Set("Content-Type", "application/json")
 	sResp, _ := http.DefaultClient.Do(sr)
 	sResp.Body.Close()
 
-	// Reject.
-	reject := relay.RelayRequest{Version: 1, Action: "reject", IntentID: "terminal-test", EncryptedPayload: "opaque-reject"}
+	// Reject (with valid claim signature).
+	rejectSig := relay.SignIntentClaim(claimPriv, 1, "reject", "terminal-test", "opaque-reject")
+	reject := relay.RelayRequest{Version: 1, Action: "reject", IntentID: "terminal-test", IntentClaimSig: rejectSig, EncryptedPayload: "opaque-reject"}
 	rb, _ := json.Marshal(reject)
 	rr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(rb))
 	rr.Header.Set("Content-Type", "application/json")
 	rResp, _ := http.DefaultClient.Do(rr)
 	rResp.Body.Close()
 
-	// Try to fulfill — should fail.
-	fulfill := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: "terminal-test", EncryptedPayload: "data"}
+	// Try to fulfill — should fail (already rejected).
+	fulfillSig := relay.SignIntentClaim(claimPriv, 1, "fulfill", "terminal-test", "data")
+	fulfill := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: "terminal-test", IntentClaimSig: fulfillSig, EncryptedPayload: "data"}
 	fb, _ := json.Marshal(fulfill)
 	fr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
 	fr.Header.Set("Content-Type", "application/json")
@@ -440,7 +499,13 @@ func TestAsyncPollAfterExpiry(t *testing.T) {
 	brokerServer := httptest.NewServer(mb)
 	defer brokerServer.Close()
 
-	req := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "expire-test", Tag: "t", EncryptedPayload: "opaque"}
+	claimPub, claimPriv, err := relay.GenerateIntentClaim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
+	req := relay.RelayRequest{Version: 1, Action: "unwrap", IntentID: "expire-test", Tag: "t", IntentClaimPub: claimPubB64, EncryptedPayload: "opaque"}
 	body, _ := json.Marshal(req)
 	httpReq, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -449,7 +514,8 @@ func TestAsyncPollAfterExpiry(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	poll := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "expire-test"}
+	pollSig := relay.SignIntentClaim(claimPriv, 1, "poll", "expire-test", "")
+	poll := relay.RelayRequest{Version: 1, Action: "poll", IntentID: "expire-test", IntentClaimSig: pollSig}
 	pb, _ := json.Marshal(poll)
 	pr, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pb))
 	pr.Header.Set("Content-Type", "application/json")
@@ -537,7 +603,7 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 	}
 
 	// Operator verifies.
-	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.Stream, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt); err != nil {
+	if err := relay.VerifyRequestPayload(inner, intentReq.Version, intentReq.Action, intentReq.Stream, intentReq.IntentID, intentReq.Tag, intentReq.ExpiresAt, intentReq.IntentClaimPub); err != nil {
 		t.Fatalf("operator verify: %v", err)
 	}
 
@@ -559,8 +625,15 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Operator extracts claim secret and signs.
+	opClaimPriv, err := relay.DecodeIntentClaimSecret(inner.IntentClaimSecret)
+	if err != nil {
+		t.Fatalf("operator decode claim secret: %v", err)
+	}
+	fulfillClaimSig := relay.SignIntentClaim(opClaimPriv, 1, "fulfill", intent.IntentID, sealed)
+
 	// Operator fulfills.
-	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intent.IntentID, EncryptedPayload: sealed}
+	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intent.IntentID, IntentClaimSig: fulfillClaimSig, EncryptedPayload: sealed}
 	fb, _ := json.Marshal(fulfillReq)
 	fh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
 	fh.Header.Set("Content-Type", "application/json")
@@ -653,8 +726,15 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 		t.Fatalf("sealing reject payload: %v", err)
 	}
 
+	// Extract claim secret for signing reject.
+	rejectClaimPriv, err := relay.DecodeIntentClaimSecret(inner.IntentClaimSecret)
+	if err != nil {
+		t.Fatalf("decode claim secret: %v", err)
+	}
+	rejectClaimSig := relay.SignIntentClaim(rejectClaimPriv, 1, "reject", pr.Intents[0].IntentID, rejectSealed)
+
 	// Reject.
-	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: pr.Intents[0].IntentID, EncryptedPayload: rejectSealed}
+	rejectReq := relay.RelayRequest{Version: 1, Action: "reject", IntentID: pr.Intents[0].IntentID, IntentClaimSig: rejectClaimSig, EncryptedPayload: rejectSealed}
 	rb, _ := json.Marshal(rejectReq)
 	rh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(rb))
 	rh.Header.Set("Content-Type", "application/json")
@@ -713,7 +793,10 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	defer eph.Clear()
 	ephRecipient := eph.RecipientString()
 
-	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, relayStanzas, ephRecipient)
+	claimPub, claimPriv, _ := relay.GenerateIntentClaim()
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, relayStanzas, ephRecipient, claimPubB64)
 	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
 	// Submit to broker.
@@ -723,6 +806,7 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 		IntentID:         intentID,
 		Tag:              tag,
 		ExpiresAt:        expiresAt,
+		IntentClaimPub:   claimPubB64,
 		EncryptedPayload: encPayload,
 	}
 	body, _ := json.Marshal(req)
@@ -768,15 +852,17 @@ func TestAsyncBrokerDoesNotSeeFileKey(t *testing.T) {
 	respInner, _ := relay.BuildResponsePayload(1, "fulfill", intentID, opFileKey)
 	sealed, _ := relay.SealResponse(*respInner, inner.EphemeralKey)
 
-	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, EncryptedPayload: sealed}
+	fulfillSig := relay.SignIntentClaim(claimPriv, 1, "fulfill", intentID, sealed)
+	fulfillReq := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: intentID, IntentClaimSig: fulfillSig, EncryptedPayload: sealed}
 	fb, _ := json.Marshal(fulfillReq)
 	fh, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(fb))
 	fh.Header.Set("Content-Type", "application/json")
 	fResp, _ := http.DefaultClient.Do(fh)
 	fResp.Body.Close()
 
-	// Poll to get the stored sealed payload.
-	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID}
+	// Poll to get the stored sealed payload (authenticated with intent claim sig).
+	pollClaimSig := relay.SignIntentClaim(claimPriv, 1, "poll", intentID, "")
+	pollReq := relay.RelayRequest{Version: 1, Action: "poll", IntentID: intentID, IntentClaimSig: pollClaimSig}
 	pollBody, _ := json.Marshal(pollReq)
 	pollHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pollBody))
 	pollHTTP.Header.Set("Content-Type", "application/json")
@@ -833,7 +919,10 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 	defer eph.Clear()
 	ephRecipient := eph.RecipientString()
 
-	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, nil, ephRecipient)
+	claimPub, _, _ := relay.GenerateIntentClaim()
+	claimPubB64 := relay.EncodeIntentClaimPub(claimPub)
+
+	innerReq, _ := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, nil, ephRecipient, claimPubB64)
 	encPayload, _ := relay.EncryptPayload(*innerReq, recipientStr)
 
 	// Submit with correct outer fields.
@@ -843,6 +932,7 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 		IntentID:         intentID,
 		Tag:              tag,
 		ExpiresAt:        expiresAt,
+		IntentClaimPub:   claimPubB64,
 		EncryptedPayload: encPayload,
 	}
 	body, _ := json.Marshal(req)
@@ -881,28 +971,28 @@ func TestAsyncOuterHashTamperDetection(t *testing.T) {
 	}
 
 	// Verify with correct outer fields — should pass.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, tag, expiresAt)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, tag, expiresAt, claimPubB64)
 	if err != nil {
 		t.Fatalf("valid verification should pass: %v", err)
 	}
 	t.Log("Valid outer hash verified")
 
 	// Verify with tampered intent_id — should fail.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, "tampered-intent", tag, expiresAt)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, "tampered-intent", tag, expiresAt, claimPubB64)
 	if err == nil {
 		t.Fatal("SECURITY: tampered intent_id should fail verification")
 	}
 	t.Log("Tampered intent_id correctly rejected")
 
 	// Verify with tampered tag — should fail.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, "tampered-tag", expiresAt)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, "tampered-tag", expiresAt, claimPubB64)
 	if err == nil {
 		t.Fatal("SECURITY: tampered tag should fail verification")
 	}
 	t.Log("Tampered tag correctly rejected")
 
 	// Verify with tampered expires_at — should fail.
-	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, tag, expiresAt+1000)
+	err = relay.VerifyRequestPayload(inner, 1, "unwrap", false, intentID, tag, expiresAt+1000, claimPubB64)
 	if err == nil {
 		t.Fatal("SECURITY: tampered expires_at should fail verification")
 	}

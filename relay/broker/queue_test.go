@@ -1,21 +1,38 @@
 package broker
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/oguzhane/age-plugin-relay/relay"
 )
+
+func testClaimKeypair(t *testing.T) (string, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := relay.GenerateIntentClaim()
+	if err != nil {
+		t.Fatalf("GenerateIntentClaim: %v", err)
+	}
+	return relay.EncodeIntentClaimPub(pub), priv
+}
 
 func TestSubmitAndPoll(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	err := q.Submit("intent-1", "tag-a", []byte(`{"test":true}`))
+	pubKey, priv := testClaimKeypair(t)
+	err := q.Submit("intent-1", "tag-a", []byte(`{"test":true}`), pubKey)
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	resp := q.Poll("intent-1")
+	sig := relay.SignIntentClaim(priv, 1, "poll", "intent-1", "")
+	resp, err := q.PollWithClaim("intent-1", sig, 1)
+	if err != nil {
+		t.Fatalf("PollWithClaim: %v", err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil poll response")
 	}
@@ -31,11 +48,12 @@ func TestSubmitDuplicateReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	if err := q.Submit("dup-1", "tag-a", []byte(`{}`)); err != nil {
+	pubKey, _ := testClaimKeypair(t)
+	if err := q.Submit("dup-1", "tag-a", []byte(`{}`), pubKey); err != nil {
 		t.Fatalf("first Submit: %v", err)
 	}
 
-	err := q.Submit("dup-1", "tag-a", []byte(`{}`))
+	err := q.Submit("dup-1", "tag-a", []byte(`{}`), pubKey)
 	if err == nil {
 		t.Fatal("expected error on duplicate intent_id")
 	}
@@ -44,13 +62,18 @@ func TestSubmitDuplicateReturnsError(t *testing.T) {
 	}
 }
 
-func TestPollUnknownReturnsNil(t *testing.T) {
+func TestPollUnknownReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	resp := q.Poll("nonexistent")
-	if resp != nil {
-		t.Fatal("expected nil for unknown intent_id")
+	_, priv := testClaimKeypair(t)
+	sig := relay.SignIntentClaim(priv, 1, "poll", "nonexistent", "")
+	_, err := q.PollWithClaim("nonexistent", sig, 1)
+	if err == nil {
+		t.Fatal("expected error for unknown intent_id")
+	}
+	if err.Error() != "unknown_intent" {
+		t.Fatalf("expected unknown_intent, got: %v", err)
 	}
 }
 
@@ -58,15 +81,21 @@ func TestFulfillAndPoll(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("intent-f", "tag-a", []byte(`{}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("intent-f", "tag-a", []byte(`{}`), pubKey)
 
 	fulfillBody := []byte(`{"version":1,"action":"fulfill","intent_id":"intent-f","encrypted_payload":"sealed-payload-data"}`)
-	err := q.Fulfill("intent-f", fulfillBody)
+	sig := relay.SignIntentClaim(priv, 1, "fulfill", "intent-f", "sealed-payload-data")
+	err := q.Fulfill("intent-f", fulfillBody, sig, 1, "fulfill", "sealed-payload-data")
 	if err != nil {
 		t.Fatalf("Fulfill: %v", err)
 	}
 
-	resp := q.Poll("intent-f")
+	pollSig := relay.SignIntentClaim(priv, 1, "poll", "intent-f", "")
+	resp, pollErr := q.PollWithClaim("intent-f", pollSig, 1)
+	if pollErr != nil {
+		t.Fatalf("PollWithClaim: %v", pollErr)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response after fulfill")
 	}
@@ -88,14 +117,20 @@ func TestRejectAndPoll(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("intent-r", "tag-a", []byte(`{}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("intent-r", "tag-a", []byte(`{}`), pubKey)
 
-	err := q.Reject("intent-r", []byte(`{"version":1,"action":"reject","intent_id":"intent-r"}`))
+	sig := relay.SignIntentClaim(priv, 1, "reject", "intent-r", "")
+	err := q.Reject("intent-r", []byte(`{"version":1,"action":"reject","intent_id":"intent-r"}`), sig, 1, "reject", "")
 	if err != nil {
 		t.Fatalf("Reject: %v", err)
 	}
 
-	resp := q.Poll("intent-r")
+	pollSig := relay.SignIntentClaim(priv, 1, "poll", "intent-r", "")
+	resp, pollErr := q.PollWithClaim("intent-r", pollSig, 1)
+	if pollErr != nil {
+		t.Fatalf("PollWithClaim: %v", pollErr)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response after reject")
 	}
@@ -111,7 +146,7 @@ func TestFulfillUnknownReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	err := q.Fulfill("nonexistent", []byte("data"))
+	err := q.Fulfill("nonexistent", []byte("data"), "dummy-sig", 1, "fulfill", "")
 	if err == nil {
 		t.Fatal("expected error for unknown intent")
 	}
@@ -124,7 +159,7 @@ func TestRejectUnknownReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	err := q.Reject("nonexistent", []byte(`{}`))
+	err := q.Reject("nonexistent", []byte(`{}`), "dummy-sig", 1, "reject", "")
 	if err == nil {
 		t.Fatal("expected error for unknown intent")
 	}
@@ -137,10 +172,13 @@ func TestFulfillAlreadyFulfilledReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("intent-ff", "tag-a", []byte(`{}`))
-	q.Fulfill("intent-ff", []byte("data"))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("intent-ff", "tag-a", []byte(`{}`), pubKey)
 
-	err := q.Fulfill("intent-ff", []byte("data2"))
+	sig := relay.SignIntentClaim(priv, 1, "fulfill", "intent-ff", "data")
+	q.Fulfill("intent-ff", []byte("data"), sig, 1, "fulfill", "data")
+
+	err := q.Fulfill("intent-ff", []byte("data2"), "dummy-sig", 1, "fulfill", "data2")
 	if err == nil {
 		t.Fatal("expected error for already-terminal intent")
 	}
@@ -153,10 +191,13 @@ func TestRejectAlreadyRejectedReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("intent-rr", "tag-a", []byte(`{}`))
-	q.Reject("intent-rr", []byte(`{}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("intent-rr", "tag-a", []byte(`{}`), pubKey)
 
-	err := q.Reject("intent-rr", []byte(`{}`))
+	sig := relay.SignIntentClaim(priv, 1, "reject", "intent-rr", "")
+	q.Reject("intent-rr", []byte(`{}`), sig, 1, "reject", "")
+
+	err := q.Reject("intent-rr", []byte(`{}`), "dummy-sig", 1, "reject", "")
 	if err == nil {
 		t.Fatal("expected error for already-terminal intent")
 	}
@@ -169,10 +210,13 @@ func TestFulfillAfterRejectReturnsError(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("intent-rf", "tag-a", []byte(`{}`))
-	q.Reject("intent-rf", []byte(`{}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("intent-rf", "tag-a", []byte(`{}`), pubKey)
 
-	err := q.Fulfill("intent-rf", []byte("data"))
+	sig := relay.SignIntentClaim(priv, 1, "reject", "intent-rf", "")
+	q.Reject("intent-rf", []byte(`{}`), sig, 1, "reject", "")
+
+	err := q.Fulfill("intent-rf", []byte("data"), "dummy-sig", 1, "fulfill", "")
 	if err == nil {
 		t.Fatal("expected error for already-terminal intent")
 	}
@@ -182,12 +226,16 @@ func TestPullReturnsOnlyPendingForTag(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("a1", "tag-a", []byte(`{"version":1,"action":"unwrap","intent_id":"a1"}`))
-	q.Submit("a2", "tag-a", []byte(`{"version":1,"action":"unwrap","intent_id":"a2"}`))
-	q.Submit("b1", "tag-b", []byte(`{"version":1,"action":"unwrap","intent_id":"b1"}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("a1", "tag-a", []byte(`{"version":1,"action":"unwrap","intent_id":"a1"}`), pubKey)
+	q.Submit("a2", "tag-a", []byte(`{"version":1,"action":"unwrap","intent_id":"a2"}`), pubKey)
+
+	pubKeyB, _ := testClaimKeypair(t)
+	q.Submit("b1", "tag-b", []byte(`{"version":1,"action":"unwrap","intent_id":"b1"}`), pubKeyB)
 
 	// Fulfill a2 — should no longer appear in pull.
-	q.Fulfill("a2", []byte("sealed"))
+	sig := relay.SignIntentClaim(priv, 1, "fulfill", "a2", "sealed")
+	q.Fulfill("a2", []byte("sealed"), sig, 1, "fulfill", "sealed")
 
 	resp := q.Pull("tag-a")
 	if len(resp.Intents) != 1 {
@@ -212,18 +260,23 @@ func TestTTLExpiresIntents(t *testing.T) {
 	q := NewQueue(50*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	q.Submit("expire-1", "tag-a", []byte(`{}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("expire-1", "tag-a", []byte(`{}`), pubKey)
 
-	resp := q.Poll("expire-1")
-	if resp == nil || resp.Status != "pending" {
+	sig := relay.SignIntentClaim(priv, 1, "poll", "expire-1", "")
+	resp, err := q.PollWithClaim("expire-1", sig, 1)
+	if err != nil || resp == nil || resp.Status != "pending" {
 		t.Fatal("expected pending immediately after submit")
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
-	resp = q.Poll("expire-1")
-	if resp != nil {
-		t.Fatalf("expected nil after TTL expiry, got status=%s", resp.Status)
+	_, err = q.PollWithClaim("expire-1", sig, 1)
+	if err == nil {
+		t.Fatal("expected error after TTL expiry")
+	}
+	if err.Error() != "unknown_intent" {
+		t.Fatalf("expected unknown_intent, got: %v", err)
 	}
 }
 
@@ -231,7 +284,8 @@ func TestTTLExpiresPullResults(t *testing.T) {
 	q := NewQueue(50*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	q.Submit("expire-p", "tag-a", []byte(`{"version":1,"action":"unwrap","intent_id":"expire-p"}`))
+	pubKey, _ := testClaimKeypair(t)
+	q.Submit("expire-p", "tag-a", []byte(`{"version":1,"action":"unwrap","intent_id":"expire-p"}`), pubKey)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -245,11 +299,12 @@ func TestFulfillAfterTTLReturnsUnknown(t *testing.T) {
 	q := NewQueue(50*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	q.Submit("expire-f", "tag-a", []byte(`{}`))
+	pubKey, _ := testClaimKeypair(t)
+	q.Submit("expire-f", "tag-a", []byte(`{}`), pubKey)
 
 	time.Sleep(100 * time.Millisecond)
 
-	err := q.Fulfill("expire-f", []byte("data"))
+	err := q.Fulfill("expire-f", []byte("data"), "dummy-sig", 1, "fulfill", "")
 	if err == nil {
 		t.Fatal("expected error fulfilling expired intent")
 	}
@@ -262,11 +317,12 @@ func TestRejectAfterTTLReturnsUnknown(t *testing.T) {
 	q := NewQueue(50*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	q.Submit("expire-r", "tag-a", []byte(`{}`))
+	pubKey, _ := testClaimKeypair(t)
+	q.Submit("expire-r", "tag-a", []byte(`{}`), pubKey)
 
 	time.Sleep(100 * time.Millisecond)
 
-	err := q.Reject("expire-r", []byte(`{}`))
+	err := q.Reject("expire-r", []byte(`{}`), "dummy-sig", 1, "reject", "")
 	if err == nil {
 		t.Fatal("expected error rejecting expired intent")
 	}
@@ -279,20 +335,55 @@ func TestSweepCleansExpiredIntents(t *testing.T) {
 	q := NewQueue(30*time.Millisecond, 10*time.Millisecond)
 	defer q.Stop()
 
-	q.Submit("sweep-1", "tag-a", []byte(`{}`))
-	q.Submit("sweep-2", "tag-a", []byte(`{}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("sweep-1", "tag-a", []byte(`{}`), pubKey)
+	q.Submit("sweep-2", "tag-a", []byte(`{}`), pubKey)
 
 	time.Sleep(80 * time.Millisecond)
 
-	if resp := q.Poll("sweep-1"); resp != nil {
+	sig1 := relay.SignIntentClaim(priv, 1, "poll", "sweep-1", "")
+	if _, err := q.PollWithClaim("sweep-1", sig1, 1); err == nil {
 		t.Fatal("expected sweep-1 to be cleaned up")
 	}
-	if resp := q.Poll("sweep-2"); resp != nil {
+	sig2 := relay.SignIntentClaim(priv, 1, "poll", "sweep-2", "")
+	if _, err := q.PollWithClaim("sweep-2", sig2, 1); err == nil {
 		t.Fatal("expected sweep-2 to be cleaned up")
 	}
 
-	if err := q.Submit("sweep-1", "tag-a", []byte(`{}`)); err != nil {
+	if err := q.Submit("sweep-1", "tag-a", []byte(`{}`), pubKey); err != nil {
 		t.Fatalf("re-submit after sweep: %v", err)
+	}
+}
+
+func TestPollWithClaimInvalidSig(t *testing.T) {
+	q := NewQueue(1*time.Minute, 30*time.Second)
+	defer q.Stop()
+
+	pubKey, _ := testClaimKeypair(t)
+	q.Submit("claim-poll-2", "tag-a", []byte(`{}`), pubKey)
+
+	// Sign with a different key.
+	_, wrongPriv := testClaimKeypair(t)
+	sig := relay.SignIntentClaim(wrongPriv, 1, "poll", "claim-poll-2", "")
+	_, err := q.PollWithClaim("claim-poll-2", sig, 1)
+	if err == nil {
+		t.Fatal("expected error for wrong key")
+	}
+	if err.Error() != "invalid_claim_sig" {
+		t.Fatalf("expected invalid_claim_sig, got: %v", err)
+	}
+}
+
+func TestPollWithClaimMissingSig(t *testing.T) {
+	q := NewQueue(1*time.Minute, 30*time.Second)
+	defer q.Stop()
+
+	pubKey, _ := testClaimKeypair(t)
+	q.Submit("claim-poll-3", "tag-a", []byte(`{}`), pubKey)
+
+	_, err := q.PollWithClaim("claim-poll-3", "", 1)
+	if err == nil {
+		t.Fatal("expected error for empty sig")
 	}
 }
 
@@ -300,9 +391,12 @@ func TestMultipleTagsIsolation(t *testing.T) {
 	q := NewQueue(1*time.Minute, 30*time.Second)
 	defer q.Stop()
 
-	q.Submit("iso-1", "alpha", []byte(`{"version":1,"action":"unwrap","intent_id":"iso-1"}`))
-	q.Submit("iso-2", "beta", []byte(`{"version":1,"action":"unwrap","intent_id":"iso-2"}`))
-	q.Submit("iso-3", "alpha", []byte(`{"version":1,"action":"unwrap","intent_id":"iso-3"}`))
+	pubKey, priv := testClaimKeypair(t)
+	q.Submit("iso-1", "alpha", []byte(`{"version":1,"action":"unwrap","intent_id":"iso-1"}`), pubKey)
+
+	pubKey2, _ := testClaimKeypair(t)
+	q.Submit("iso-2", "beta", []byte(`{"version":1,"action":"unwrap","intent_id":"iso-2"}`), pubKey2)
+	q.Submit("iso-3", "alpha", []byte(`{"version":1,"action":"unwrap","intent_id":"iso-3"}`), pubKey)
 
 	alpha := q.Pull("alpha")
 	if len(alpha.Intents) != 2 {
@@ -314,7 +408,8 @@ func TestMultipleTagsIsolation(t *testing.T) {
 		t.Fatalf("expected 1 beta intent, got %d", len(beta.Intents))
 	}
 
-	q.Fulfill("iso-1", []byte("sealed"))
+	sig := relay.SignIntentClaim(priv, 1, "fulfill", "iso-1", "sealed")
+	q.Fulfill("iso-1", []byte("sealed"), sig, 1, "fulfill", "sealed")
 	beta2 := q.Pull("beta")
 	if len(beta2.Intents) != 1 {
 		t.Fatalf("beta should still have 1 intent, got %d", len(beta2.Intents))

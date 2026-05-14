@@ -46,11 +46,12 @@ import (
 // operator via the broker. It contains the age stanzas, the plugin's ephemeral
 // public key for response encryption, and integrity fields.
 type InnerRequestPayload struct {
-	Nonce        string        `json:"nonce"`         // 16 random bytes, hex-encoded
-	OuterHash    string        `json:"outer_hash"`    // SHA-256 of ALL outer envelope fields (see package doc)
-	ExpiresAt    int64         `json:"expires_at"`    // Unix timestamp (seconds)
-	Stanzas      []RelayStanza `json:"stanzas"`       // inner age stanzas
-	EphemeralKey string        `json:"ephemeral_key"` // age recipient string (age1...)
+	Nonce             string        `json:"nonce"`                          // 16 random bytes, hex-encoded
+	OuterHash         string        `json:"outer_hash"`                     // SHA-256 of ALL outer envelope fields (see package doc)
+	ExpiresAt         int64         `json:"expires_at"`                     // Unix timestamp (seconds)
+	Stanzas           []RelayStanza `json:"stanzas"`                        // inner age stanzas
+	EphemeralKey      string        `json:"ephemeral_key"`                  // age recipient string (age1...)
+	IntentClaimSecret string        `json:"intent_claim_secret,omitempty"`  // Ed25519 private key seed (32B, base64 raw std)
 }
 
 // InnerResponsePayload is the age-encrypted payload sent from the operator
@@ -65,17 +66,17 @@ type InnerResponsePayload struct {
 // payload to every outer envelope field (the Complete Outer Field Binding principle).
 //
 // Inputs: every RelayRequest field except encrypted_payload.
-// Canonical form: "{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}"
+// Canonical form: "{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}"
 // where stream is "0" or "1". Dot-separated, no JSON, no whitespace.
 //
 // IMPORTANT: If a new field is added to the request envelope, it MUST be added
 // here. Omitting a field allows the broker to tamper with it undetected.
-func OuterHashRequest(version int, action string, stream bool, intentID, tag string, expiresAt int64) string {
+func OuterHashRequest(version int, action string, stream bool, intentID, tag string, expiresAt int64, intentClaimPub string) string {
 	streamStr := "0"
 	if stream {
 		streamStr = "1"
 	}
-	canonical := strconv.Itoa(version) + "." + action + "." + streamStr + "." + intentID + "." + tag + "." + strconv.FormatInt(expiresAt, 10)
+	canonical := strconv.Itoa(version) + "." + action + "." + streamStr + "." + intentID + "." + tag + "." + strconv.FormatInt(expiresAt, 10) + "." + intentClaimPub
 	h := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(h[:])
 }
@@ -159,8 +160,8 @@ func DecryptPayload(encryptedB64 string, identities []age.Identity) (*InnerReque
 // VerifyRequestPayload checks that the inner payload's outer_hash matches the
 // recomputed hash from the outer routing fields, and that the intent has not
 // expired.
-func VerifyRequestPayload(inner *InnerRequestPayload, version int, action string, stream bool, intentID, tag string, expiresAt int64) error {
-	expected := OuterHashRequest(version, action, stream, intentID, tag, expiresAt)
+func VerifyRequestPayload(inner *InnerRequestPayload, version int, action string, stream bool, intentID, tag string, expiresAt int64, intentClaimPub string) error {
+	expected := OuterHashRequest(version, action, stream, intentID, tag, expiresAt, intentClaimPub)
 	if inner.OuterHash != expected {
 		return fmt.Errorf("outer_hash mismatch: broker may have tampered with routing fields")
 	}
@@ -172,14 +173,14 @@ func VerifyRequestPayload(inner *InnerRequestPayload, version int, action string
 
 // BuildRequestPayload constructs an InnerRequestPayload with a fresh nonce and
 // the computed outer hash.
-func BuildRequestPayload(version int, action string, stream bool, intentID, tag string, expiresAt int64, stanzas []RelayStanza, ephemeralRecipient string) (*InnerRequestPayload, error) {
+func BuildRequestPayload(version int, action string, stream bool, intentID, tag string, expiresAt int64, stanzas []RelayStanza, ephemeralRecipient string, intentClaimPub string) (*InnerRequestPayload, error) {
 	nonce, err := generateNonce()
 	if err != nil {
 		return nil, err
 	}
 	return &InnerRequestPayload{
 		Nonce:        nonce,
-		OuterHash:    OuterHashRequest(version, action, stream, intentID, tag, expiresAt),
+		OuterHash:    OuterHashRequest(version, action, stream, intentID, tag, expiresAt, intentClaimPub),
 		ExpiresAt:    expiresAt,
 		Stanzas:      stanzas,
 		EphemeralKey: ephemeralRecipient,

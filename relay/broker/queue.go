@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/oguzhane/age-plugin-relay/relay"
 )
 
 // Queue is a thread-safe in-memory intent queue with TTL-based expiry.
@@ -35,31 +37,57 @@ func (q *Queue) Stop() {
 	close(q.stopSweep)
 }
 
-// Submit stores a new intent. Returns an error if the intent_id already exists (409).
-func (q *Queue) Submit(intentID, tag string, requestBody []byte) error {
+// Submit stores a new intent. Returns an error if the intent_id already exists (409)
+// or if intentClaimPub is empty (400).
+func (q *Queue) Submit(intentID, tag string, requestBody []byte, intentClaimPub string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if intentClaimPub == "" {
+		return fmt.Errorf("missing_intent_claim_pub")
+	}
 
 	if _, exists := q.intents[intentID]; exists {
 		return fmt.Errorf("duplicate_intent")
 	}
 
 	q.intents[intentID] = &Intent{
-		IntentID:  intentID,
-		Tag:       tag,
-		Request:   requestBody,
-		Status:    StatusPending,
-		CreatedAt: time.Now(),
+		IntentID:       intentID,
+		Tag:            tag,
+		IntentClaimPub: intentClaimPub,
+		Request:        requestBody,
+		Status:         StatusPending,
+		CreatedAt:      time.Now(),
 	}
 	return nil
 }
 
-// Poll returns the current state of an intent. Returns nil if the intent
-// does not exist (expired or never created — collapsed to 404).
-func (q *Queue) Poll(intentID string) *PollResponse {
+// PollWithClaim returns the current state of an intent after verifying the
+// caller's intent claim signature. Returns an error if the intent doesn't exist,
+// is expired, or the signature is invalid.
+func (q *Queue) PollWithClaim(intentID, intentClaimSig string, version int) (*PollResponse, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	intent, ok := q.intents[intentID]
+	if !ok {
+		return nil, fmt.Errorf("unknown_intent")
+	}
+
+	if time.Since(intent.CreatedAt) > q.maxTTL {
+		delete(q.intents, intentID)
+		return nil, fmt.Errorf("unknown_intent")
+	}
+
+	if err := relay.VerifyIntentClaim(intent.IntentClaimPub, intentClaimSig, version, "poll", intentID, ""); err != nil {
+		return nil, err
+	}
+
+	return q.pollLocked(intentID), nil
+}
+
+// pollLocked returns the poll response for an intent. Must be called with q.mu held.
+func (q *Queue) pollLocked(intentID string) *PollResponse {
 	intent, ok := q.intents[intentID]
 	if !ok {
 		return nil
@@ -119,8 +147,10 @@ func (q *Queue) Pull(tag string) *PullResponse {
 
 // Fulfill marks an intent as fulfilled with the operator's response body.
 // The responseBody is stored verbatim and returned to the plugin on poll.
-// Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
+// The intentClaimSig is verified against the stored intent_claim_pub.
+// Returns an error if the intent doesn't exist, is expired, already terminal,
+// or the signature is invalid.
+func (q *Queue) Fulfill(intentID string, responseBody []byte, intentClaimSig string, version int, action string, encryptedPayload string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -136,6 +166,10 @@ func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
 
 	if intent.Status != StatusPending {
 		return fmt.Errorf("intent_already_terminal")
+	}
+
+	if err := relay.VerifyIntentClaim(intent.IntentClaimPub, intentClaimSig, version, action, intentID, encryptedPayload); err != nil {
+		return err
 	}
 
 	intent.Status = StatusFulfilled
@@ -145,8 +179,10 @@ func (q *Queue) Fulfill(intentID string, responseBody []byte) error {
 
 // Reject marks an intent as rejected with the operator's response body.
 // The responseBody is stored verbatim and returned to the plugin on poll.
-// Returns an error if the intent doesn't exist, is expired, or is already terminal.
-func (q *Queue) Reject(intentID string, responseBody []byte) error {
+// The intentClaimSig is verified against the stored intent_claim_pub.
+// Returns an error if the intent doesn't exist, is expired, already terminal,
+// or the signature is invalid.
+func (q *Queue) Reject(intentID string, responseBody []byte, intentClaimSig string, version int, action string, encryptedPayload string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -162,6 +198,10 @@ func (q *Queue) Reject(intentID string, responseBody []byte) error {
 
 	if intent.Status != StatusPending {
 		return fmt.Errorf("intent_already_terminal")
+	}
+
+	if err := relay.VerifyIntentClaim(intent.IntentClaimPub, intentClaimSig, version, action, intentID, encryptedPayload); err != nil {
+		return err
 	}
 
 	intent.Status = StatusRejected

@@ -38,7 +38,7 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		}
 
 		// Verify.
-		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt); err != nil {
+		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(RelayResponse{Error: "verify: " + err.Error()})
 			return

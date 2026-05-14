@@ -122,6 +122,8 @@ Every request to the broker/relay-server has at most these cleartext fields:
 | `tag` | unwrap, pull | Operator routing |
 | `stream` | unwrap | Transport hint (SSE) |
 | `expires_at` | unwrap | Unix timestamp (seconds). Plugin-defined intent expiry. |
+| `intent_claim_pub` | unwrap | Ed25519 public key (base64). Per-intent authorization — see [Intent Claim](INTENT-CLAIM.md) |
+| `intent_claim_sig` | fulfill, reject | Ed25519 signature (base64). Proves operator decrypted the payload — see [Intent Claim](INTENT-CLAIM.md) |
 | `encrypted_payload` | unwrap, fulfill | Opaque blob — broker stores and forwards |
 
 No stanzas, no ephemeral keys, no file keys at the outer level.
@@ -133,20 +135,22 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
 ```json
 {
   "nonce": "<16 random bytes, hex>",
-  "outer_hash": "<SHA-256(version.action.stream.intent_id.tag.expires_at), hex>",
+  "outer_hash": "<SHA-256(version.action.stream.intent_id.tag.expires_at.intent_claim_pub), hex>",
   "stanzas": [
     { "type": "X25519", "args": ["..."], "body": "..." }
   ],
-  "ephemeral_key": "<age1... ephemeral recipient string>"
+  "ephemeral_key": "<age1... ephemeral recipient string>",
+  "intent_claim_secret": "<Ed25519 private key seed, base64 raw std>"
 }
 ```
 
 | Field | Description |
 |---|---|
 | `nonce` | 16 random bytes, hex-encoded. Ensures ciphertext uniqueness at the protocol level. Discarded after decryption. |
-| `outer_hash` | `SHA-256("version.action.stream.intent_id.tag.expires_at")` — dot-separated, canonical. `stream` is `"0"` or `"1"`. Binds the encrypted payload to all outer routing fields including expiry. |
+| `outer_hash` | `SHA-256("version.action.stream.intent_id.tag.expires_at.intent_claim_pub")` — dot-separated, canonical. `stream` is `"0"` or `"1"`. Binds the encrypted payload to all outer routing fields including expiry and intent claim public key. |
 | `stanzas` | Inner age stanzas (base64 raw standard bodies). |
 | `ephemeral_key` | Plugin's ephemeral age recipient string (`age1...`) for the response envelope. |
+| `intent_claim_secret` | Ed25519 private key seed (32 bytes, base64 raw standard). Only the operator (who decrypts) can extract this. See [Intent Claim](INTENT-CLAIM.md). |
 
 **Encryption**: `age.Encrypt` to the operator's inner recipient (same recipient string the plugin uses for `Wrap`). Works with any recipient type: X25519, YubiKey, PQ, any plugin. The age encryption layer adds its own ephemeral key and nonce internally. Output: base64-encoded standard age ciphertext.
 
@@ -200,6 +204,7 @@ The outer hash binds the encrypted blob to the cleartext routing fields. Any mod
 | `intent_id` | ✓ |
 | `tag` | ✓ |
 | `expires_at` | ✓ (as decimal string) |
+| `intent_claim_pub` | ✓ |
 | `encrypted_payload` | — (this IS the encrypted blob; the hash lives inside it) |
 
 **Response envelope fields** (server/operator → plugin):
@@ -214,16 +219,16 @@ The outer hash binds the encrypted blob to the cleartext routing fields. Any mod
 **Request outer hash** (verified by operator):
 
 ```
-SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}")
+SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")
 ```
 
 Example:
 
 ```
-SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800")
+SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800.AAAA...")
 ```
 
-Dot separator. No JSON. No whitespace. `expires_at` as decimal string. Deterministic on both sides.
+Dot separator. No JSON. No whitespace. `expires_at` as decimal string. `intent_claim_pub` as base64 raw standard (empty string if not set). Deterministic on both sides.
 
 **Response outer hash** (verified by plugin):
 
@@ -288,6 +293,7 @@ Authorization: Bearer <auth_token>
   "tag": "QPg24g",
   "expires_at": 1715350800,
   "stream": true,
+  "intent_claim_pub": "<base64: Ed25519 public key>",
   "encrypted_payload": "<base64: age-encrypted blob>"
 }
 ```
@@ -298,22 +304,24 @@ Authorization: Bearer <auth_token>
 - `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:4]`, base64).
 - `expires_at`: Unix timestamp (seconds) — intent expiry.
 - `stream`: Optional. If `true`, the client accepts SSE responses.
+- `intent_claim_pub`: Ed25519 public key (base64 raw standard). Per-intent authorization. See [Intent Claim](INTENT-CLAIM.md).
 - `encrypted_payload`: age-encrypted inner request payload (see §3.3). Opaque to the broker.
 
 **Plugin build steps:**
 
 1. Generate ephemeral age X25519 identity (keypair).
-2. Build inner request payload: `{nonce, outer_hash, stanzas, ephemeral_key}`.
-3. `age.Encrypt(inner, unwrap_recipient)` → `encrypted_payload`.
-4. Build outer envelope with `version`, `action`, `intent_id`, `tag`, `expires_at`, `encrypted_payload`.
-5. POST to relay endpoint.
+2. Generate Ed25519 intent claim keypair.
+3. Build inner request payload: `{nonce, outer_hash, stanzas, ephemeral_key, intent_claim_secret}`.
+4. `age.Encrypt(inner, unwrap_recipient)` → `encrypted_payload`.
+5. Build outer envelope with `version`, `action`, `intent_id`, `tag`, `expires_at`, `intent_claim_pub`, `encrypted_payload`.
+6. POST to relay endpoint.
 
 ### 4.2. Processing (relay-server)
 
 1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
 2. Parse inner payload.
 3. Check `expires_at` from the outer fields — reject if in the past.
-4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at")` from the outer fields.
+4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at.intent_claim_pub")` from the outer fields.
 5. Compare against `outer_hash` — mismatch = tampered = reject.
 6. Extract `stanzas` and `ephemeral_key`.
 7. `identity.Unwrap(stanzas)` → file key.
@@ -432,11 +440,12 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
   "tag": "QPg24g",
   "expires_at": 1715350800,
+  "intent_claim_pub": "<base64: Ed25519 public key>",
   "encrypted_payload": "<base64: age-encrypted blob>"
 }
 ```
 
-**Inner request payload** — identical to §3.3. Contains `{nonce, outer_hash, stanzas, ephemeral_key}`, age-encrypted to the operator's `unwrap_recipient`.
+**Inner request payload** — identical to §3.3. Contains `{nonce, outer_hash, stanzas, ephemeral_key, intent_claim_secret}`, age-encrypted to the operator's `unwrap_recipient`.
 
 - `intent_id` is **plugin-generated**: 16 random bytes, hex-encoded (32 chars).
 - `expires_at` is the plugin-defined intent expiry (Unix timestamp, seconds).
@@ -483,12 +492,14 @@ The operator receives the verbatim outer envelope from the broker and processes 
 1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
 2. Parse inner payload.
 3. Check `expires_at` from the outer fields — reject if in the past.
-4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at")` from the outer fields.
+4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at.intent_claim_pub")` from the outer fields.
 5. Compare against `outer_hash` — mismatch = broker tampered = reject the intent.
-6. Extract `stanzas` and `ephemeral_key`.
-7. `identity.Unwrap(stanzas)` → file key.
-8. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("1.fulfill".intent_id)`.
-9. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
+6. Extract `stanzas`, `ephemeral_key`, and `intent_claim_secret`.
+7. Reconstruct Ed25519 private key from `intent_claim_secret`.
+8. `identity.Unwrap(stanzas)` → file key.
+9. Build inner response payload: `{nonce, outer_hash, file_key}` where `outer_hash = SHA-256("1.fulfill".intent_id)`.
+10. `age.Encrypt(inner_response, ephemeral_recipient)` → response `encrypted_payload`.
+11. Sign `"{version}.fulfill.{intent_id}.{SHA-256(encrypted_payload)}"` with claim private key → `intent_claim_sig`.
 
 ### 5.5. Fulfill (operator → broker)
 
@@ -497,13 +508,14 @@ The operator receives the verbatim outer envelope from the broker and processes 
   "version": 1,
   "action": "fulfill",
   "intent_id": "a3f1...",
+  "intent_claim_sig": "<base64: Ed25519 signature>",
   "encrypted_payload": "<base64: age-encrypted inner response>"
 }
 ```
 
-The `encrypted_payload` contains the inner response payload (§3.4) age-encrypted to the plugin's ephemeral recipient from the original request.
+The `encrypted_payload` contains the inner response payload (§3.4) age-encrypted to the plugin's ephemeral recipient from the original request. The `intent_claim_sig` signs the canonical string `"{version}.fulfill.{intent_id}.{SHA-256(encrypted_payload)}"` — see [Intent Claim](INTENT-CLAIM.md).
 
-**Response:** `200 OK` on success, `404` if `intent_id` is unknown, `409` if already terminal.
+**Response:** `200 OK` on success, `404` if `intent_id` is unknown, `409` if already terminal, `403` if `intent_claim_sig` is invalid.
 
 ### 5.6. Reject (operator → broker)
 
@@ -511,19 +523,23 @@ The `encrypted_payload` contains the inner response payload (§3.4) age-encrypte
 {
   "version": 1,
   "action": "reject",
-  "intent_id": "a3f1..."
+  "intent_id": "a3f1...",
+  "intent_claim_sig": "<base64: Ed25519 signature>"
 }
 ```
 
-**Response:** `200 OK` on success, `404`/`409` as for `fulfill`.
+**Response:** `200 OK` on success, `404`/`409` as for `fulfill`, `403` if `intent_claim_sig` is invalid.
 
 ### 5.7. Poll (plugin → broker)
+
+Poll requests are authenticated with `intent_claim_sig` — proving the caller is the intent creator.
 
 ```json
 {
   "version": 1,
   "action": "poll",
-  "intent_id": "a3f1..."
+  "intent_id": "a3f1...",
+  "intent_claim_sig": "<base64: Ed25519 sig over '1.poll.{intent_id}.{SHA-256(\"\")}'>"
 }
 ```
 
@@ -532,6 +548,8 @@ The `encrypted_payload` contains the inner response payload (§3.4) age-encrypte
 | `200 OK` | `{"status":"pending"}` | Keep polling |
 | `200 OK` | `{"status":"fulfilled", "response": {...}}` | Plugin extracts `encrypted_payload` from response, decrypts with ephemeral identity, verifies outer_hash |
 | `200 OK` | `{"status":"rejected", "response": {...}}` | Operator declined; `response` contains verbatim operator reject body; plugin returns failure |
+| `400` | `{"error":"missing intent_claim_sig"}` | Poll request missing required signature |
+| `403` | `{"error":"invalid_claim_sig"}` | Signature verification failed — caller is not the intent creator |
 | `404` | `{"error":"unknown_intent"}` | Expired, never existed, or broker forgot — plugin treats as failure |
 
 The broker does not distinguish "expired" from "never existed." Both collapse to `404`.
@@ -583,17 +601,22 @@ Plugin                          Broker                          Operator
 ──────                          ──────                          ────────
   │                               │                                │
   │  1. Generate ephemeral        │                                │
-  │  2. Build inner payload       │                                │
-  │  3. age.Encrypt(inner,        │                                │
+  │  2. Generate intent claim     │                                │
+  │     keypair (Ed25519)         │                                │
+  │  3. Build inner payload       │                                │
+  │     (includes claim secret)   │                                │
+  │  4. age.Encrypt(inner,        │                                │
   │     unwrap_recipient)         │                                │
   │                               │                                │
   │  POST {action:"unwrap",       │                                │
   │   intent_id, tag, expires_at, │                                │
+  │   intent_claim_pub,           │                                │
   │   encrypted_payload}          │                                │
   │ ─────────────────────────────►│                                │
-  │                               │  4. Store intent:              │
+  │                               │  5. Store intent:              │
   │                               │     intent_id, tag,            │
   │                               │     expires_at,                │
+  │                               │     intent_claim_pub,          │
   │                               │     encrypted_payload          │
   │                               │     (all opaque to broker)     │
   │  202 Accepted                 │                                │
@@ -608,21 +631,27 @@ Plugin                          Broker                          Operator
   │                               │    POST body as raw JSON>}]}   │
   │                               │ ──────────────────────────────►│
   │                               │                                │
-  │                               │                5. age.Decrypt(encrypted_payload, identity)
-  │                               │                6. Check expires_at
-  │                               │                7. Verify outer_hash
-  │                               │                8. Extract stanzas + ephemeral_key
-  │                               │                9. identity.Unwrap(stanzas) → file_key
-  │                               │               10. Build InnerResponsePayload:
+  │                               │                6. age.Decrypt(encrypted_payload, identity)
+  │                               │                7. Check expires_at
+  │                               │                8. Verify outer_hash
+  │                               │                9. Extract stanzas + ephemeral_key
+  │                               │                   + intent_claim_secret
+  │                               │               10. identity.Unwrap(stanzas) → file_key
+  │                               │               11. Build InnerResponsePayload:
   │                               │                   {nonce, outer_hash, file_key}
-  │                               │               11. age.Encrypt(inner, ephemeral_recipient)
+  │                               │               12. age.Encrypt(inner, ephemeral_recipient)
+  │                               │               13. Sign with intent_claim_secret
+  │                               │                   → intent_claim_sig
   │                               │                                │
   │                               │  POST {action:"fulfill",       │
   │                               │   intent_id,                   │
+  │                               │   intent_claim_sig,            │
   │                               │   encrypted_payload}           │
   │                               │ ◄──────────────────────────────│
   │                               │                                │
-  │                               │  12. Store verbatim fulfill    │
+  │                               │  14. Verify intent_claim_sig   │
+  │                               │      against stored pub key    │
+  │                               │  15. Store verbatim fulfill    │
   │                               │      body on intent (opaque)   │
   │                               │                                │
   │                               │  200 OK                        │
@@ -638,16 +667,16 @@ Plugin                          Broker                          Operator
   │   operator fulfill body>}     │                                │
   │ ◄─────────────────────────────│                                │
   │                               │                                │
-  │ 13. Parse response →          │                                │
+  │ 16. Parse response →          │                                │
   │     extract encrypted_payload │                                │
-  │ 14. age.Decrypt(             │                                │
+  │ 17. age.Decrypt(             │                                │
   │     encrypted_payload,        │                                │
   │     eph_identity)             │                                │
-  │ 15. Verify outer_hash         │                                │
+  │ 18. Verify outer_hash         │                                │
   │     == SHA-256("1.fulfill"  │                                │
   │       .intent_id)            │                                │
-  │ 16. Extract file_key          │                                │
-  │ 17. Discard ephemeral keypair │                                │
+  │ 19. Extract file_key          │                                │
+  │ 20. Discard ephemeral keypair │                                │
   │                               │                                │
 ```
 
@@ -668,12 +697,19 @@ Plugin                          Broker                          Operator
   │                               │ ──────────────────────────────►│
   │                               │                                │
   │                               │         1. age.Decrypt → OK    │
-  │                               │         2. Unwrap fails        │
+  │                               │         2. Extract claim secret│
+  │                               │         3. Unwrap fails        │
   │                               │            (no matching key)   │
+  │                               │         4. Sign reject with    │
+  │                               │            claim secret        │
   │                               │                                │
   │                               │  POST {action:"reject",        │
-  │                               │   intent_id}                   │
+  │                               │   intent_id,                   │
+  │                               │   intent_claim_sig}            │
   │                               │ ◄──────────────────────────────│
+  │                               │                                │
+  │                               │  5. Verify intent_claim_sig    │
+  │                               │                                │
   │                               │  200 OK                        │
   │                               │ ──────────────────────────────►│
   │                               │                                │
@@ -716,6 +752,7 @@ Plugins MUST NOT blindly retry `unwrap` with the same `intent_id` — that path 
 - **End-to-end encrypted payloads** — stanzas and file keys are never visible to the broker or any intermediary.
 - **Tamper detection** — SHA-256 outer hash binds encrypted payloads to cleartext routing fields. Every envelope field outside `encrypted_payload` is included in the hash — this is a fundamental protocol invariant (see §3.5).
 - **Sealed action binding** — every `action` value (fulfill, reject, etc.) carries an `encrypted_payload` with a verified outer hash. No cleartext-only envelopes are trusted. This prevents the broker from forging actions (e.g., fabricating a reject to deny service). See §3.5.
+- **Intent claim authorization** — per-intent Ed25519 keypair ensures only the party who decrypted the inner payload (legitimate operator) can fulfill or reject. The broker holds only the public key and verifies signatures. See [Intent Claim](INTENT-CLAIM.md).
 - **Forward secrecy** — plugin generates a fresh ephemeral age X25519 identity per intent; age internally generates fresh ephemeral keys per encryption. Both discarded after use.
 - **Transport-independent** — encrypted end-to-end even over plaintext HTTP.
 - **With SOPS key groups + Shamir** — intercepting one group's unwrapped share is information-theoretically useless without the other share(s).
@@ -752,6 +789,9 @@ action              ✓ (sets it)         ✓ (routes on it)    ✓ (verifies vi
 intent_id           ✓ (generates it)    ✓ (indexes on it)   ✓ (verifies via hash)
 tag                 ✓ (computes it)     ✓ (routes on it)    ✓ (verifies via hash)
 expires_at          ✓ (sets it)         ✓ (can use for TTL) ✓ (verifies via hash)
+intent_claim_pub    ✓ (generates it)    ✓ (stores + verifies sig) ✓ (verifies via hash)
+intent_claim_secret ✓ (encrypts it)     ✗ (opaque)          ✓ (decrypts, signs)
+intent_claim_sig    — (plugin doesn't sign) ✓ (verifies it)  ✓ (signs it)
 stanzas             ✓ (encrypts them)   ✗ (opaque)          ✓ (decrypts them)
 ephemeral_key       ✓ (generates it)    ✗ (opaque)          ✓ (seals to it)
 file_key            ✓ (decrypts it)     ✗ (opaque)          ✓ (unwraps it)
@@ -790,6 +830,11 @@ nonce               ✓ (generates it)    ✗ (opaque)          ✓ (discards it
 - Without the operator's age recipient public key, an attacker cannot create a valid `encrypted_payload` that the operator can decrypt.
 - Even with the public key, the attacker cannot create a payload containing valid age-wrapped stanzas (those require the correct file key).
 
+#### Fabricated fulfill/reject (mitigated by Intent Claim)
+- Even if an attacker can send HTTP requests to the broker, they cannot fabricate a valid `fulfill` or `reject` because the broker requires a valid `intent_claim_sig`.
+- The Ed25519 private key (seed) is inside the age-encrypted inner payload — only the legitimate operator who decrypted it can sign.
+- See [Intent Claim](INTENT-CLAIM.md) for the full design.
+
 #### Operator response forgery
 - The operator age-encrypts `encrypted_payload` to the plugin's ephemeral recipient from the original request.
 - Only a holder of the matching ephemeral identity (the plugin) can decrypt it.
@@ -801,7 +846,7 @@ nonce               ✓ (generates it)    ✗ (opaque)          ✓ (discards it
 | Attack | Impact | Mitigation |
 |---|---|---|
 | Drop intents (DoS) | Plugin times out | Plugin's local timeout bounds the loss |
-| Return `rejected` instead of `fulfilled` | Plugin fails decryption | DoS only — no cryptographic compromise |
+| Return `rejected` instead of `fulfilled` | Plugin fails decryption | DoS only — no cryptographic compromise. Broker cannot forge a valid reject (requires `intent_claim_sig`). |
 | Traffic analysis on `tag` | Learns per-operator volume | Future: tag blinding (out of scope) |
 | Replay stored `encrypted_payload` | age.Decrypt fails (different ephemeral key per intent) | Cryptographically prevented |
 
@@ -942,6 +987,7 @@ age-plugin-relay/
 │   ├── client.go                       # RelayRequest/Response/Stanza, PostToRelay, SSE parser, async polling
 │   ├── config.go                       # Config, RemoteConfig, LoadConfig, LookupRemote, PollInterval
 │   ├── payload.go                      # Encrypted payload: EncryptPayload, DecryptPayload, OuterHash, inner types
+│   ├── claim.go                        # Intent Claim: Ed25519 keypair generation, signing, verification
 │   ├── envelope.go                     # Age response encryption: SealResponse, OpenResponse
 │   ├── broker/                         # Broker queue package (package broker)
 │   │   ├── types.go                    # Intent, Status, PullResponse, PollResponse
@@ -953,6 +999,7 @@ age-plugin-relay/
 │   ├── client_test.go                 # Client tests (PostToRelay, extractFileKey, sanitizeErrorMsg, auth, SSE, async)
 │   ├── config_test.go                 # Config tests (LoadConfig, LookupRemote, timeout, poll interval)
 │   ├── payload_test.go                # Encrypted payload tests (outer hash, encrypt/decrypt, verify, tamper detection)
+│   ├── claim_test.go                  # Intent Claim tests (Ed25519 sign/verify, round-trip, tampering)
 │   ├── envelope_test.go               # Envelope seal/open unit tests (age encryption)
 │   ├── async_test.go                  # Async (broker) tests (broker protocol, E2E)
 │   ├── integration_test.go            # Integration tests (age.Encrypt/Decrypt E2E, broker blindness, tampering)
@@ -967,7 +1014,10 @@ age-plugin-relay/
 │   └── relay-operator/
 │       └── main.go                     # Operator CLI: pull, decrypt, verify, unwrap, seal, fulfill/reject
 ├── docs/
-│   └── ARCHITECTURE.md                 # This file — authoritative technical reference
+│   ├── ARCHITECTURE.md                 # This file — authoritative technical reference
+│   ├── ASYNC-WIRE-FORMAT.md            # Async wire format reference
+│   ├── SYNC-WIRE-FORMAT.md             # Sync wire format reference
+│   └── INTENT-CLAIM.md                 # Intent Claim design (per-intent Ed25519 authorization)
 ├── test.sh                             # Step-by-step CLI integration test
 └── README.md                           # Usage, installation, quick start
 ```
@@ -978,6 +1028,7 @@ age-plugin-relay/
 - [`filippo.io/age/plugin`](https://pkg.go.dev/filippo.io/age/plugin) — Plugin framework, Bech32 encoding helpers
 - [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto) — Cryptographic primitives
 - [`gopkg.in/yaml.v3`](https://pkg.go.dev/gopkg.in/yaml.v3) — Config file parsing
+- `crypto/ed25519` (Go stdlib) — Intent Claim signing and verification
 
 ---
 
@@ -1076,6 +1127,20 @@ go test -v ./relay/
 | `TestOuterHashTamperDetectionTag` | Encrypt → decrypt → verify with tampered tag fails |
 | `TestOuterHashTamperDetectionIntentID` | Encrypt → decrypt → verify with tampered intent_id fails |
 | `TestExpiresAtEnforcement` | Encrypt → decrypt → verify with expired timestamp fails |
+
+#### Intent Claim tests (`claim_test.go`)
+
+| Test | What it validates |
+|---|---|
+| `TestGenerateIntentClaim` | Keypair generation produces valid 32-byte public key and 64-byte private key |
+| `TestEncodeDecodeIntentClaimSecret` | Round-trip encode/decode of Ed25519 private key seed |
+| `TestSignAndVerifyRoundTrip` | Sign → verify round-trip succeeds |
+| `TestVerifyWrongKey` | Verification fails with a different public key |
+| `TestVerifyTamperedAction` | Verification fails when action is tampered |
+| `TestVerifyTamperedIntentID` | Verification fails when intent_id is tampered |
+| `TestVerifyTamperedPayload` | Verification fails when encrypted_payload is tampered |
+| `TestIntentClaimCanonicalDeterminism` | Same inputs produce same canonical string |
+| `TestVerifyIntentClaimInvalidBase64` | Invalid base64 inputs return errors |
 
 #### Envelope tests (`envelope_test.go`)
 
