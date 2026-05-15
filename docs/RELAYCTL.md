@@ -1,9 +1,9 @@
-# relayctl — CLI Reference
+# relayctl.sh — CLI Reference
 
 Operational CLI tool for `age-plugin-relay`. Manages keys, services, and encrypt/decrypt workflows for both sync and async relay flows.
 
 ```
-relayctl <command> [options]
+./relayctl.sh <command> [options]
 ```
 
 ---
@@ -15,7 +15,7 @@ relayctl <command> [options]
 Generate a new X25519 key pair and save it to the workspace.
 
 ```bash
-relayctl keygen
+./relayctl.sh keygen
 ```
 
 Output:
@@ -30,7 +30,7 @@ Prints the public key and suggests the next step.
 Generate a relay recipient (for encryption) and relay identity (for decryption) from an inner recipient.
 
 ```bash
-relayctl generate --recipient <age1...> --remote <name> [--config <relay-config.yaml>]
+./relayctl.sh generate --recipient <age1...> --remote <name> [--config <relay-config.yaml>]
 ```
 
 | Flag | Required | Description |
@@ -50,7 +50,7 @@ Output:
 Compute the routing tag for a recipient. The tag is used by the operator to filter which intents to pull from the broker.
 
 ```bash
-relayctl tag --recipient <age1...>
+./relayctl.sh tag --recipient <age1...>
 ```
 
 The tag is `base64(SHA256(recipient)[:16])` — the same value the plugin embeds in relay stanzas.
@@ -66,10 +66,10 @@ All services run as background daemons. PID files and logs are stored in the wor
 Manage the relay-server (sync flow — holds an age identity and unwraps stanzas directly).
 
 ```bash
-relayctl server start --identity <file> [options]
-relayctl server stop
-relayctl server status
-relayctl server logs [N]
+./relayctl.sh server start --identity <file> [options]
+./relayctl.sh server stop
+./relayctl.sh server status
+./relayctl.sh server logs [N]
 ```
 
 | Flag | Default | Description |
@@ -88,10 +88,10 @@ relayctl server logs [N]
 Manage the relay-broker (async flow — zero-trust queue, holds no key material).
 
 ```bash
-relayctl broker start [options]
-relayctl broker stop
-relayctl broker status
-relayctl broker logs [N]
+./relayctl.sh broker start [options]
+./relayctl.sh broker stop
+./relayctl.sh broker status
+./relayctl.sh broker logs [N]
 ```
 
 | Flag | Default | Description |
@@ -107,11 +107,11 @@ relayctl broker logs [N]
 Manage the relay-operator (async flow — polls the broker, holds the age identity, fulfills/rejects intents).
 
 ```bash
-relayctl operator start --broker <url> --identity <file> --tag <tag> [options]
-relayctl operator run --broker <url> --identity <file> --tag <tag> [options]
-relayctl operator stop
-relayctl operator status
-relayctl operator logs [N]
+./relayctl.sh operator start --broker <url> --identity <file> --tag <tag> [options]
+./relayctl.sh operator run --broker <url> --identity <file> --tag <tag> [options]
+./relayctl.sh operator stop
+./relayctl.sh operator status
+./relayctl.sh operator logs [N]
 ```
 
 - `start` — runs the operator as a background daemon with `--loop` (continuous polling)
@@ -126,7 +126,7 @@ relayctl operator logs [N]
 | `--pull-interval` | `5s` | How often to poll the broker (daemon mode only) |
 | `--loop` | off | Run as continuous daemon (used internally by `start`) |
 
-Use `relayctl tag --recipient <age1...>` to compute the tag for a recipient.
+Use `./relayctl.sh tag --recipient <age1...>` to compute the tag for a recipient.
 
 ---
 
@@ -137,8 +137,8 @@ Use `relayctl tag --recipient <age1...>` to compute the tag for a recipient.
 Encrypt data using a relay recipient. Reads from stdin or a file, writes to stdout or a file.
 
 ```bash
-echo "secret" | relayctl encrypt -r <age1relay1...> -o secret.age
-relayctl encrypt -r <age1relay1...> -i plaintext.txt -o secret.age
+echo "secret" | ./relayctl.sh encrypt -r <age1relay1...> -o secret.age
+./relayctl.sh encrypt -r <age1relay1...> -i plaintext.txt -o secret.age
 ```
 
 | Flag | Description |
@@ -154,8 +154,8 @@ relayctl encrypt -r <age1relay1...> -i plaintext.txt -o secret.age
 Decrypt data using a relay identity. Requires a running relay-server (sync) or broker+operator (async).
 
 ```bash
-relayctl decrypt -i workspace/relay-identity.txt -f secret.age
-relayctl decrypt -i relay-id.txt -f secret.age --config relay-config.yaml -o plaintext.txt
+./relayctl.sh decrypt -i workspace/relay-identity.txt -f secret.age
+./relayctl.sh decrypt -i relay-id.txt -f secret.age --config relay-config.yaml -o plaintext.txt
 ```
 
 | Flag | Description |
@@ -179,7 +179,7 @@ Config auto-discovery order:
 Show all running services at a glance.
 
 ```bash
-relayctl status
+./relayctl.sh status
 ```
 
 ### `stop`
@@ -187,7 +187,7 @@ relayctl status
 Stop all running services (operator, broker, server).
 
 ```bash
-relayctl stop
+./relayctl.sh stop
 ```
 
 ### `clean`
@@ -195,7 +195,7 @@ relayctl stop
 Stop all services and remove the workspace directory.
 
 ```bash
-relayctl clean
+./relayctl.sh clean
 ```
 
 ### `build`
@@ -203,7 +203,7 @@ relayctl clean
 Build all Go binaries (plugin, server, broker, operator). Binaries that are missing are auto-built on first use; this command forces a rebuild.
 
 ```bash
-relayctl build
+./relayctl.sh build
 ```
 
 ---
@@ -237,98 +237,114 @@ workspace/
 
 ## Examples
 
-### Sync Flow
+### Sync Flow Walkthrough
 
 Encrypt and decrypt through a relay-server that holds the identity directly.
 
 ```bash
-# 1. Generate keys
-relayctl keygen
-PUBKEY=$(grep "public key:" workspace/identity.txt | awk '{print $NF}')
+# 1. Build all binaries
+./relayctl.sh build
 
-# 2. Create config
-cat > workspace/relay-config.yaml <<EOF
+# 2. Generate an age key pair (the server-side identity)
+./relayctl.sh keygen
+# => Public key:  age1abc...
+# => Identity:    workspace/identity.txt
+
+# 3. Create relay-config.yaml pointing to the relay server
+cat > relay-config.yaml <<EOF
 remotes:
-  local:
+  my-server:
     url: http://127.0.0.1:19876
-    unwrap_recipient: ${PUBKEY}
-    timeout: 10s
+    unwrap_recipient: age1abc...
 EOF
 
-# 3. Generate relay recipient + identity
-relayctl generate -r "$PUBKEY" --remote local --config workspace/relay-config.yaml
+# 4. Generate relay recipient + identity
+./relayctl.sh generate --recipient age1abc... --remote my-server
+# => Relay recipient: age1relay1...
+# => Relay identity:  AGE-PLUGIN-RELAY-1...
 
-# 4. Start relay-server
-relayctl server start --identity workspace/identity.txt
+# 5. Start the relay server
+./relayctl.sh server start --identity workspace/identity.txt
 
-# 5. Encrypt + decrypt
-echo "hello world" | relayctl encrypt -r "$(cat workspace/relay-recipient.txt)" -o secret.age
-relayctl decrypt -i workspace/relay-identity.txt -f secret.age
+# 6. Encrypt a message (no server needed)
+echo "hello relay" | ./relayctl.sh encrypt -r age1relay1... -o workspace/secret.age
 
-# 6. Cleanup
-relayctl server stop
+# 7. Decrypt (contacts the relay server)
+./relayctl.sh decrypt -i workspace/relay-identity.txt -f workspace/secret.age --config relay-config.yaml
+# => hello relay
+
+# 8. Clean up
+./relayctl.sh stop && ./relayctl.sh clean
 ```
 
-### Async Flow
+### Async Flow Walkthrough
 
 Encrypt and decrypt through a broker + operator. The operator can run on a different machine.
 
 ```bash
-# 1. Generate keys
-relayctl keygen
-PUBKEY=$(grep "public key:" workspace/identity.txt | awk '{print $NF}')
-TAG=$(relayctl tag -r "$PUBKEY" 2>&1 | grep "Tag:" | awk '{print $NF}')
+# 1. Build all binaries
+./relayctl.sh build
 
-# 2. Create config pointing at the broker
-cat > workspace/relay-config.yaml <<EOF
+# 2. Generate an age key pair (the operator-side identity)
+./relayctl.sh keygen
+# => Public key:  age1abc...
+# => Identity:    workspace/identity.txt
+
+# 3. Create relay-config.yaml pointing to the broker
+cat > relay-config.yaml <<EOF
 remotes:
-  mybroker:
+  async-test:
     url: http://127.0.0.1:8443
-    unwrap_recipient: ${PUBKEY}
-    timeout: 15s
-    poll_interval: 500ms
+    unwrap_recipient: age1abc...
+    mode: async
 EOF
 
-# 3. Generate relay recipient + identity
-relayctl generate -r "$PUBKEY" --remote mybroker --config workspace/relay-config.yaml
+# 4. Generate relay recipient + identity
+./relayctl.sh generate --recipient age1abc... --remote async-test
+# => Relay recipient: age1relay1...
+# => Relay identity:  AGE-PLUGIN-RELAY-1...
 
-# 4. Start broker + operator
-relayctl broker start --port 8443
-relayctl operator start \
+# 5. Start the broker
+./relayctl.sh broker start
+
+# 6. Encrypt a message
+echo "hello async relay" | ./relayctl.sh encrypt -r age1relay1... -o workspace/secret.age
+
+# 7. Decrypt (posts intent to broker, then waits for operator)
+./relayctl.sh decrypt -i workspace/relay-identity.txt -f workspace/secret.age --config relay-config.yaml &
+
+# 8. Get the routing tag and run the operator one-shot
+./relayctl.sh tag --recipient age1abc...
+# => Tag: ZZnBS3j6P3TOWCrPMO/YGA
+
+./relayctl.sh operator run \
   --broker http://127.0.0.1:8443 \
   --identity workspace/identity.txt \
-  --tag "$TAG" \
-  --pull-interval 500ms
+  --tag ZZnBS3j6P3TOWCrPMO/YGA
+# => ✓ Operator completed
 
-# One-shot: pull once and exit
-relayctl operator run \
-  --broker http://127.0.0.1:8443 \
-  --identity workspace/identity.txt \
-  --tag "$TAG"
+# The decrypt command returns:
+# => hello async relay
 
-# 5. Encrypt + decrypt (plugin → broker → operator → broker → plugin)
-echo "async secret" | relayctl encrypt -r "$(cat workspace/relay-recipient.txt)" -o secret.age
-relayctl decrypt -i workspace/relay-identity.txt -f secret.age
-
-# 6. Cleanup
-relayctl stop
+# 9. Clean up
+./relayctl.sh stop && ./relayctl.sh clean
 ```
 
 ### With Authentication
 
 ```bash
-relayctl server start --identity keys.txt --auth-token my-secret-token
+./relayctl.sh server start --identity keys.txt --auth-token my-secret-token
 # Config must include: auth_token: my-secret-token
 ```
 
 ### With TLS
 
 ```bash
-relayctl server start --identity keys.txt \
+./relayctl.sh server start --identity keys.txt \
   --tls-cert server.crt --tls-key server.key
 
 # With mTLS (client certificates required):
-relayctl server start --identity keys.txt \
+./relayctl.sh server start --identity keys.txt \
   --tls-cert server.crt --tls-key server.key --tls-ca ca.crt
 # Config must include: tls_cert, tls_key, tls_ca
 ```
