@@ -172,10 +172,10 @@ func buildAll(t *testing.T) (ageBin, ageKeygenBin, pluginBin, relayServerBin str
 func buildAllBinaries(t *testing.T) e2eBinaries {
 	t.Helper()
 
-	// Locate age binaries: two levels up from relay/ → ../../bin/
+	// Locate age binaries: one level up from relay/ → ../tools/bin/
 	srcDir, _ := os.Getwd()
-	ageBin := filepath.Join(srcDir, "..", "..", "bin", "age")
-	ageKeygenBin := filepath.Join(srcDir, "..", "..", "bin", "age-keygen")
+	ageBin := filepath.Join(srcDir, "..", "tools", "bin", "age")
+	ageKeygenBin := filepath.Join(srcDir, "..", "tools", "bin", "age-keygen")
 	if _, err := os.Stat(ageBin); err != nil {
 		t.Skipf("age binary not found at %s — skipping E2E test", ageBin)
 	}

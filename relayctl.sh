@@ -35,14 +35,14 @@ WORKSPACE="${RELAYCTL_WORKSPACE:-${SCRIPT_DIR}/workspace}"
 
 # ── Binary Discovery ─────────────────────────────────────────────────────────
 
-AGE="${SCRIPT_DIR}/../bin/age"
-AGE_KEYGEN="${SCRIPT_DIR}/../bin/age-keygen"
+AGE="${SCRIPT_DIR}/tools/bin/age"
+AGE_KEYGEN="${SCRIPT_DIR}/tools/bin/age-keygen"
 PLUGIN_BIN="${SCRIPT_DIR}/age-plugin-relay"
 SERVER_BIN="${SCRIPT_DIR}/relay-server"
 BROKER_BIN="${SCRIPT_DIR}/relay-broker"
 OPERATOR_BIN="${SCRIPT_DIR}/relay-operator"
 
-# Fall back to PATH if ../bin/ doesn't exist
+# Fall back to PATH if tools/bin/ doesn't exist
 [ -x "$AGE" ] || AGE="$(command -v age 2>/dev/null || true)"
 [ -x "$AGE_KEYGEN" ] || AGE_KEYGEN="$(command -v age-keygen 2>/dev/null || true)"
 
@@ -72,7 +72,7 @@ ensure_workspace() {
 # ── Auto-build ───────────────────────────────────────────────────────────────
 
 ensure_age() {
-    [ -n "$AGE" ] && [ -x "$AGE" ] || die "age binary not found. Install age or place it in ../bin/"
+    [ -n "$AGE" ] && [ -x "$AGE" ] || die "age binary not found. Install age or place it in tools/bin/"
     [ -n "$AGE_KEYGEN" ] && [ -x "$AGE_KEYGEN" ] || die "age-keygen binary not found."
 }
 
