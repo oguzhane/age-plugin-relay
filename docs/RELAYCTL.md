@@ -115,10 +115,14 @@ Manage the relay-operator (async flow — polls the broker, holds the age identi
 
 ```bash
 relayctl operator start --broker <url> --identity <file> --tag <tag> [options]
+relayctl operator run --broker <url> --identity <file> --tag <tag> [options]
 relayctl operator stop
 relayctl operator status
 relayctl operator logs [N]
 ```
+
+- `start` — runs the operator as a background daemon with `--loop` (continuous polling)
+- `run` — runs the operator in one-shot mode (foreground, pulls once, exits)
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -126,7 +130,8 @@ relayctl operator logs [N]
 | `--identity`, `-i` | — | Age identity file (required) |
 | `--tag` | — | Routing tag to filter intents (required) |
 | `--auth-token` | — | Bearer token for broker access |
-| `--pull-interval` | `5s` | How often to poll the broker |
+| `--pull-interval` | `5s` | How often to poll the broker (daemon mode only) |
+| `--loop` | off | Run as continuous daemon (used internally by `start`) |
 
 Use `relayctl tag --recipient <age1...>` to compute the tag for a recipient.
 
@@ -301,6 +306,12 @@ relayctl operator start \
   --identity workspace/identity.txt \
   --tag "$TAG" \
   --pull-interval 500ms
+
+# One-shot: pull once and exit
+relayctl operator run \
+  --broker http://127.0.0.1:8443 \
+  --identity workspace/identity.txt \
+  --tag "$TAG"
 
 # 5. Encrypt + decrypt (plugin → broker → operator → broker → plugin)
 echo "async secret" | relayctl encrypt -r "$(cat workspace/relay-recipient.txt)" -o secret.age

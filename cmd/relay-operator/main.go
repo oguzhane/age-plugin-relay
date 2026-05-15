@@ -11,8 +11,12 @@
 //	  --broker https://broker.example:8443 \
 //	  --identity keys.txt \
 //	  --tag QPg24g \
+//	  [--loop] \
 //	  [--auth-token broker-bearer-token] \
 //	  [--pull-interval 5s]
+//
+// By default the operator runs in one-shot mode: it pulls pending intents once,
+// processes them, and exits. Use --loop to run as a continuous polling daemon.
 package main
 
 import (
@@ -39,6 +43,7 @@ func main() {
 		identityFile string
 		tag          string
 		authToken    string
+		loop         bool
 		pullInterval = 5 * time.Second
 	)
 
@@ -64,6 +69,8 @@ func main() {
 			if i < len(os.Args) {
 				authToken = os.Args[i]
 			}
+		case "--loop":
+			loop = true
 		case "--pull-interval":
 			i++
 			if i < len(os.Args) {
@@ -77,8 +84,9 @@ func main() {
 	if brokerURL == "" || identityFile == "" || tag == "" {
 		fmt.Fprintf(os.Stderr, "Usage: relay-operator --broker URL --identity FILE --tag TAG [options]\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
+		fmt.Fprintf(os.Stderr, "  --loop               Run as a continuous daemon (default: one-shot)\n")
 		fmt.Fprintf(os.Stderr, "  --auth-token TOKEN   Bearer token for broker access\n")
-		fmt.Fprintf(os.Stderr, "  --pull-interval DUR  Polling interval (default: 5s)\n")
+		fmt.Fprintf(os.Stderr, "  --pull-interval DUR  Polling interval in loop mode (default: 5s)\n")
 		os.Exit(1)
 	}
 
@@ -92,117 +100,127 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "[relay-operator] Loaded %d identity(ies) from %s\n", len(identities), identityFile)
-	fmt.Fprintf(os.Stderr, "[relay-operator] Polling %s for tag=%s every %s\n", brokerURL, tag, pullInterval)
+	if loop {
+		fmt.Fprintf(os.Stderr, "[relay-operator] Polling %s for tag=%s every %s (loop mode)\n", brokerURL, tag, pullInterval)
+	} else {
+		fmt.Fprintf(os.Stderr, "[relay-operator] Pulling %s for tag=%s (one-shot)\n", brokerURL, tag)
+	}
 
 	for {
-		pullResp, err := pullIntents(brokerURL, tag, authToken)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[relay-operator] Pull error: %v\n", err)
-			time.Sleep(pullInterval)
+		processIntents(brokerURL, tag, authToken, identities)
+
+		if !loop {
+			break
+		}
+		time.Sleep(pullInterval)
+	}
+}
+
+func processIntents(brokerURL, tag, authToken string, identities []age.Identity) {
+	pullResp, err := pullIntents(brokerURL, tag, authToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[relay-operator] Pull error: %v\n", err)
+		return
+	}
+
+	for _, intent := range pullResp.Intents {
+		fmt.Fprintf(os.Stderr, "[relay-operator] Processing intent %s\n", intent.IntentID)
+
+		// 0. Unmarshal the verbatim request from the broker.
+		var req relay.RelayRequest
+		if err := json.Unmarshal(intent.Request, &req); err != nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   Malformed request — skipping\n")
 			continue
 		}
 
-		for _, intent := range pullResp.Intents {
-			fmt.Fprintf(os.Stderr, "[relay-operator] Processing intent %s\n", intent.IntentID)
-
-			// 0. Unmarshal the verbatim request from the broker.
-			var req relay.RelayRequest
-			if err := json.Unmarshal(intent.Request, &req); err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Malformed request — skipping\n")
-				continue
-			}
-
-			// 1. Decrypt the encrypted payload.
-			if req.EncryptedPayload == "" {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   No encrypted_payload — skipping\n")
-				continue
-			}
-
-			inner, err := relay.DecryptPayload(req.EncryptedPayload, identities)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Decrypt failed: %v — skipping\n", err)
-				continue
-			}
-
-			// 2. Verify outer hash and expiry.
-			if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, nil, authToken); err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
-				}
-				continue
-			}
-
-			// 2b. Extract intent claim secret for signing fulfill/reject.
-			var claimPriv ed25519.PrivateKey
-			if inner.IntentClaimSecret != "" {
-				priv, err := relay.DecodeIntentClaimSecret(inner.IntentClaimSecret)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid intent claim secret: %v — skipping\n", err)
-					continue
-				}
-				claimPriv = priv
-			}
-
-			// 3. Convert stanzas and attempt unwrap.
-			stanzas := make([]*age.Stanza, len(inner.Stanzas))
-			for i, s := range inner.Stanzas {
-				bodyBytes, err := base64.RawStdEncoding.DecodeString(s.Body)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid stanza body: %v\n", err)
-					continue
-				}
-				stanzas[i] = &age.Stanza{
-					Type: s.Type,
-					Args: s.Args,
-					Body: bodyBytes,
-				}
-			}
-
-			var fileKey []byte
-			for _, id := range identities {
-				fileKey, err = id.Unwrap(stanzas)
-				if err == nil {
-					break
-				}
-			}
-			if fileKey == nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   No identity could unwrap — rejecting\n")
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
-				}
-				continue
-			}
-
-			// 4. Build response payload and seal with age encryption to plugin's ephemeral recipient.
-			respInner, err := relay.BuildResponsePayload(1, "fulfill", intent.IntentID, fileKey)
-			clear(fileKey)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Build response error: %v — rejecting\n", err)
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
-				}
-				continue
-			}
-
-			sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Seal error: %v — rejecting\n", err)
-				if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
-					fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
-				}
-				continue
-			}
-
-			// 6. Fulfill the intent.
-			if err := fulfillIntent(brokerURL, intent.IntentID, sealed, claimPriv, authToken); err != nil {
-				fmt.Fprintf(os.Stderr, "[relay-operator]   Fulfill error: %v\n", err)
-				continue
-			}
-			fmt.Fprintf(os.Stderr, "[relay-operator]   Fulfilled intent %s\n", intent.IntentID)
+		// 1. Decrypt the encrypted payload.
+		if req.EncryptedPayload == "" {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   No encrypted_payload — skipping\n")
+			continue
 		}
 
-		time.Sleep(pullInterval)
+		inner, err := relay.DecryptPayload(req.EncryptedPayload, identities)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   Decrypt failed: %v — skipping\n", err)
+			continue
+		}
+
+		// 2. Verify outer hash and expiry.
+		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
+			if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, nil, authToken); err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
+			}
+			continue
+		}
+
+		// 2b. Extract intent claim secret for signing fulfill/reject.
+		var claimPriv ed25519.PrivateKey
+		if inner.IntentClaimSecret != "" {
+			priv, err := relay.DecodeIntentClaimSecret(inner.IntentClaimSecret)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid intent claim secret: %v — skipping\n", err)
+				continue
+			}
+			claimPriv = priv
+		}
+
+		// 3. Convert stanzas and attempt unwrap.
+		stanzas := make([]*age.Stanza, len(inner.Stanzas))
+		for i, s := range inner.Stanzas {
+			bodyBytes, err := base64.RawStdEncoding.DecodeString(s.Body)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Invalid stanza body: %v\n", err)
+				continue
+			}
+			stanzas[i] = &age.Stanza{
+				Type: s.Type,
+				Args: s.Args,
+				Body: bodyBytes,
+			}
+		}
+
+		var fileKey []byte
+		for _, id := range identities {
+			fileKey, err = id.Unwrap(stanzas)
+			if err == nil {
+				break
+			}
+		}
+		if fileKey == nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   No identity could unwrap — rejecting\n")
+			if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
+			}
+			continue
+		}
+
+		// 4. Build response payload and seal with age encryption to plugin's ephemeral recipient.
+		respInner, err := relay.BuildResponsePayload(1, "fulfill", intent.IntentID, fileKey)
+		clear(fileKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   Build response error: %v — rejecting\n", err)
+			if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
+			}
+			continue
+		}
+
+		sealed, err := relay.SealResponse(*respInner, inner.EphemeralKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   Seal error: %v — rejecting\n", err)
+			if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, claimPriv, authToken); err != nil {
+				fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)
+			}
+			continue
+		}
+
+		// 6. Fulfill the intent.
+		if err := fulfillIntent(brokerURL, intent.IntentID, sealed, claimPriv, authToken); err != nil {
+			fmt.Fprintf(os.Stderr, "[relay-operator]   Fulfill error: %v\n", err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[relay-operator]   Fulfilled intent %s\n", intent.IntentID)
 	}
 }
 

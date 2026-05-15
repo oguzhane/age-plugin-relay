@@ -241,7 +241,7 @@ func startBroker(t *testing.T, brokerBin string, port int, authToken, maxTTL str
 // startOperator starts a relay-operator in the background.
 func startOperator(t *testing.T, operatorBin, brokerURL, identityFile, tag string, authToken, pullInterval string) *exec.Cmd {
 	t.Helper()
-	args := []string{"--broker", brokerURL, "--identity", identityFile, "--tag", tag}
+	args := []string{"--broker", brokerURL, "--identity", identityFile, "--tag", tag, "--loop"}
 	if authToken != "" {
 		args = append(args, "--auth-token", authToken)
 	}

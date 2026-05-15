@@ -15,7 +15,7 @@ set -euo pipefail
 # Services:
 #   server  start|stop|status|logs      Manage relay-server
 #   broker  start|stop|status|logs      Manage relay-broker
-#   operator start|stop|status|logs     Manage relay-operator
+#   operator start|run|stop|status|logs  Manage relay-operator
 #
 # Encrypt / Decrypt:
 #   encrypt -r <recipient> [-i infile] [-o outfile]
@@ -459,10 +459,42 @@ cmd_operator() {
                 --broker "$broker_url" \
                 --identity "$identity" \
                 --tag "$tag" \
+                --loop \
                 "${extra_args[@]+"${extra_args[@]}"}"
             ;;
         stop)
             stop_daemon "relay-operator"
+            ;;
+        run)
+            ensure_operator
+
+            local broker_url="" identity="" tag="" extra_args=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --broker)         broker_url="$2"; shift 2 ;;
+                    --identity|-i)    identity="$2"; shift 2 ;;
+                    --tag)            tag="$2"; shift 2 ;;
+                    --auth-token)     extra_args+=("--auth-token" "$2"); shift 2 ;;
+                    *) die "Unknown option: $1" ;;
+                esac
+            done
+
+            [ -n "$broker_url" ] || die "Missing --broker <url>"
+            [ -n "$identity" ]   || die "Missing --identity <file>"
+            [ -n "$tag" ]        || die "Missing --tag <tag>"
+            [ -f "$identity" ]   || die "Identity file not found: ${identity}"
+
+            header "Running relay-operator (one-shot)"
+            info "Broker:   ${broker_url}"
+            info "Identity: ${identity}"
+            info "Tag:      ${tag}"
+
+            "$OPERATOR_BIN" \
+                --broker "$broker_url" \
+                --identity "$identity" \
+                --tag "$tag" \
+                "${extra_args[@]+"${extra_args[@]}"}"
+            pass "Operator completed"
             ;;
         status)
             daemon_status "relay-operator"
@@ -471,7 +503,7 @@ cmd_operator() {
             daemon_logs "relay-operator" "${1:-20}"
             ;;
         *)
-            die "Usage: relayctl operator start|stop|status|logs"
+            die "Usage: relayctl operator start|run|stop|status|logs"
             ;;
     esac
 }
@@ -596,7 +628,7 @@ cmd_help() {
     echo -e "${BOLD}Services:${NC}"
     echo "  server  start|stop|status|logs        Manage relay-server"
     echo "  broker  start|stop|status|logs        Manage relay-broker"
-    echo "  operator start|stop|status|logs       Manage relay-operator"
+    echo "  operator start|run|stop|status|logs  Manage relay-operator (start=daemon, run=one-shot)"
     echo ""
     echo -e "${BOLD}Encrypt / Decrypt:${NC}"
     echo "  encrypt -r <recipient> [-i infile] [-o outfile]"

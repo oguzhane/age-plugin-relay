@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -256,4 +257,69 @@ func TestE2EAsyncWrongAuthToken(t *testing.T) {
 	// Should fail — broker rejects unauthorized requests.
 	output := decryptMessageExpectFailure(t, bins.Age, bins.Plugin, relayIdentityStr, ciphertextFile, configFile)
 	t.Logf("Expected auth failure output: %s", strings.TrimSpace(output))
+}
+
+// TestE2EAsyncOneShotOperator tests the operator in one-shot mode (no --loop).
+// The decrypt runs concurrently — it submits an intent to the broker, then the
+// one-shot operator pulls and fulfills it, and the decrypt completes.
+func TestE2EAsyncOneShotOperator(t *testing.T) {
+	bins := buildAllBinaries(t)
+	tmpDir := t.TempDir()
+
+	remoteKeyFile := filepath.Join(tmpDir, "remote.key")
+	run(t, bins.AgeKeygen, "-o", remoteKeyFile)
+	remotePubKey := extractPublicKey(t, remoteKeyFile)
+
+	brokerPort := freePort(t)
+	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", brokerPort)
+	startBroker(t, bins.RelayBroker, brokerPort, "", "2m")
+
+	tag := computeTagB64(remotePubKey)
+
+	configFile := writeRelayConfig(t, tmpDir, "oneshot", brokerURL, remotePubKey, map[string]string{
+		"timeout":       "30s",
+		"poll_interval": "500ms",
+	})
+
+	relayRecipient, relayIdentityStr := generateRelayKeys(t, bins.Plugin, remotePubKey, "oneshot", configFile)
+
+	plaintext := "E2E one-shot operator — " + time.Now().Format(time.RFC3339Nano)
+	ciphertextFile := encryptMessage(t, bins.Age, bins.Plugin, relayRecipient, plaintext, tmpDir)
+
+	// Start decrypt in background (it submits intent and polls broker).
+	type result struct {
+		text string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		idDir := t.TempDir()
+		idFile := filepath.Join(idDir, "relay-identity.txt")
+		os.WriteFile(idFile, []byte(relayIdentityStr+"\n"), 0600)
+		decCmd := exec.Command(bins.Age, "-d", "-i", idFile, ciphertextFile)
+		decCmd.Env = append(pluginEnv(bins.Plugin), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
+		out, err := decCmd.CombinedOutput()
+		ch <- result{strings.TrimRight(string(out), "\n"), err}
+	}()
+
+	// Give the plugin a moment to submit the intent.
+	time.Sleep(1 * time.Second)
+
+	// Run operator in one-shot mode (no --loop).
+	cmd := exec.Command(bins.RelayOperator, "--broker", brokerURL, "--identity", remoteKeyFile, "--tag", tag)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("one-shot operator failed: %v", err)
+	}
+	t.Logf("One-shot operator exited successfully")
+
+	// Wait for decrypt to complete.
+	res := <-ch
+	if res.err != nil {
+		t.Fatalf("decrypt failed: %v — output: %s", res.err, res.text)
+	}
+	if res.text != plaintext {
+		t.Fatalf("plaintext mismatch:\n  want: %q\n  got:  %q", plaintext, res.text)
+	}
+	t.Logf("Decrypted via one-shot operator: %q", res.text)
 }
