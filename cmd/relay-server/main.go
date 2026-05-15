@@ -214,7 +214,7 @@ func main() {
 			return
 		}
 		rejectResp := relay.RelayRequest{Version: 1, Action: "reject", IntentID: req.IntentID, EncryptedPayload: rejectSealed}
-		if req.Stream {
+		if stream {
 			writeSSE(w, "reject", rejectResp)
 		} else {
 			writeJSON(w, http.StatusOK, rejectResp)

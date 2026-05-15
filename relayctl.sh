@@ -351,6 +351,7 @@ cmd_server() {
                     --tls-cert)      extra_args+=("-tls-cert" "$2"); shift 2 ;;
                     --tls-key)       extra_args+=("-tls-key" "$2"); shift 2 ;;
                     --tls-ca)        extra_args+=("-tls-ca" "$2"); shift 2 ;;
+                    --stream)        extra_args+=("-stream"); shift ;;
                     *) die "Unknown option: $1" ;;
                 esac
             done

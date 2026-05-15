@@ -41,7 +41,7 @@ func TestE2ESyncHappyPath(t *testing.T) {
 }
 
 // TestE2ESSEStream exercises the full user flow with SSE streaming enabled
-// via relay-config.yaml stream: true.
+// via relay-server -stream flag.
 func TestE2ESSEStream(t *testing.T) {
 	bins := buildAllBinaries(t)
 	tmpDir := t.TempDir()

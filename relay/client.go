@@ -51,7 +51,6 @@ type asyncPollResponse struct {
 type RelayRequest struct {
 	Version          int    `json:"version"`
 	Action           string `json:"action"`
-	Stream           bool   `json:"stream,omitempty"`            // deprecated: server decides response format
 	IntentID         string `json:"intent_id,omitempty"`         // plugin-generated, 16 random bytes hex
 	Tag              string `json:"tag,omitempty"`               // routing tag for operator pull
 	ExpiresAt        int64  `json:"expires_at,omitempty"`         // Unix timestamp (seconds)
