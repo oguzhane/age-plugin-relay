@@ -25,7 +25,7 @@ set -euo pipefail
 #   status                              Show all running services
 #   stop                                Stop all running services
 #   clean                               Remove workspace + stop services
-#   build                               Build all binaries
+#   build                               Build all binaries into bin/
 #
 # Environment:
 #   RELAYCTL_WORKSPACE    Workspace directory (default: ./workspace)
@@ -37,10 +37,11 @@ WORKSPACE="${RELAYCTL_WORKSPACE:-${SCRIPT_DIR}/workspace}"
 
 AGE="${SCRIPT_DIR}/tools/bin/age"
 AGE_KEYGEN="${SCRIPT_DIR}/tools/bin/age-keygen"
-PLUGIN_BIN="${SCRIPT_DIR}/age-plugin-relay"
-SERVER_BIN="${SCRIPT_DIR}/relay-server"
-BROKER_BIN="${SCRIPT_DIR}/relay-broker"
-OPERATOR_BIN="${SCRIPT_DIR}/relay-operator"
+BIN_DIR="${SCRIPT_DIR}/bin"
+PLUGIN_BIN="${BIN_DIR}/age-plugin-relay"
+SERVER_BIN="${BIN_DIR}/relay-server"
+BROKER_BIN="${BIN_DIR}/relay-broker"
+OPERATOR_BIN="${BIN_DIR}/relay-operator"
 
 # Fall back to PATH if tools/bin/ doesn't exist
 [ -x "$AGE" ] || AGE="$(command -v age 2>/dev/null || true)"
@@ -79,6 +80,7 @@ ensure_age() {
 ensure_plugin() {
     if [ ! -x "$PLUGIN_BIN" ]; then
         info "Building age-plugin-relay..."
+        mkdir -p "$BIN_DIR"
         go build -o "$PLUGIN_BIN" "${SCRIPT_DIR}/cmd/age-plugin-relay/" || die "Build failed"
     fi
 }
@@ -86,6 +88,7 @@ ensure_plugin() {
 ensure_server() {
     if [ ! -x "$SERVER_BIN" ]; then
         info "Building relay-server..."
+        mkdir -p "$BIN_DIR"
         go build -o "$SERVER_BIN" "${SCRIPT_DIR}/cmd/relay-server/" || die "Build failed"
     fi
 }
@@ -93,6 +96,7 @@ ensure_server() {
 ensure_broker() {
     if [ ! -x "$BROKER_BIN" ]; then
         info "Building relay-broker..."
+        mkdir -p "$BIN_DIR"
         go build -o "$BROKER_BIN" "${SCRIPT_DIR}/cmd/relay-broker/" || die "Build failed"
     fi
 }
@@ -100,6 +104,7 @@ ensure_broker() {
 ensure_operator() {
     if [ ! -x "$OPERATOR_BIN" ]; then
         info "Building relay-operator..."
+        mkdir -p "$BIN_DIR"
         go build -o "$OPERATOR_BIN" "${SCRIPT_DIR}/cmd/relay-operator/" || die "Build failed"
     fi
 }
@@ -365,7 +370,7 @@ cmd_server() {
             info "Port:     ${port}"
 
             # Add plugin to PATH so relay-server can discover it
-            export PATH="${SCRIPT_DIR}:${PATH}"
+            export PATH="${BIN_DIR}:${PATH}"
 
             start_daemon "relay-server" "$SERVER_BIN" \
                 -identity "$identity" \
@@ -524,7 +529,7 @@ cmd_encrypt() {
 
     [ -n "$recipient" ] || die "Missing -r <recipient>"
 
-    export PATH="${SCRIPT_DIR}:${PATH}"
+    export PATH="${BIN_DIR}:${PATH}"
 
     local age_args=("-r" "$recipient")
     [ -n "$outfile" ] && age_args+=("-o" "$outfile")
@@ -558,7 +563,7 @@ cmd_decrypt() {
     [ -n "$identity_file" ] || die "Missing -i <identity-file>"
     [ -f "$identity_file" ] || die "Identity file not found: ${identity_file}"
 
-    export PATH="${SCRIPT_DIR}:${PATH}"
+    export PATH="${BIN_DIR}:${PATH}"
     # Auto-discover config: explicit flag > env var > workspace default
     if [ -n "$config" ]; then
         export AGE_PLUGIN_RELAY_CONFIG="$config"
@@ -601,6 +606,8 @@ cmd_clean() {
 cmd_build() {
     header "Building all binaries"
 
+    mkdir -p "$BIN_DIR"
+
     local module_root="${SCRIPT_DIR}"
     local bins=("age-plugin-relay" "relay-server" "relay-broker" "relay-operator")
     local cmds=("./cmd/age-plugin-relay/" "./cmd/relay-server/" "./cmd/relay-broker/" "./cmd/relay-operator/")
@@ -608,7 +615,7 @@ cmd_build() {
     for i in "${!bins[@]}"; do
         local name="${bins[$i]}"
         local pkg="${cmds[$i]}"
-        local output="${SCRIPT_DIR}/${name}"
+        local output="${BIN_DIR}/${name}"
 
         info "Building ${name}..."
         go build -o "$output" "${module_root}/${pkg}" || die "Failed to build ${name}"

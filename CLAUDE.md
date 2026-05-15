@@ -9,10 +9,12 @@ age-plugin-relay is a Go plugin for [age encryption](https://age-encryption.org)
 ## Build Commands
 
 ```bash
-go build -o age-plugin-relay ./cmd/age-plugin-relay/
-go build -o relay-server ./cmd/relay-server/
-go build -o relay-broker ./cmd/relay-broker/
-go build -o relay-operator ./cmd/relay-operator/
+go build -o bin/age-plugin-relay ./cmd/age-plugin-relay/
+go build -o bin/relay-server ./cmd/relay-server/
+go build -o bin/relay-broker ./cmd/relay-broker/
+go build -o bin/relay-operator ./cmd/relay-operator/
+# Or use relayctl:
+./relayctl.sh build
 ```
 
 ## Test Commands

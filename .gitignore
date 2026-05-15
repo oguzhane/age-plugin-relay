@@ -4,6 +4,9 @@ tmp/
 # Test binaries
 *.test
 
+# Build output
+bin/
+
 # Coverage
 coverage.out
 coverage.html
