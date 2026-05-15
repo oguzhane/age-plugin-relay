@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -152,13 +153,29 @@ func TestE2ESSEStream(t *testing.T) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// e2eBinaries holds paths to all built binaries for E2E tests.
+type e2eBinaries struct {
+	Age           string
+	AgeKeygen     string
+	Plugin        string
+	RelayServer   string
+	RelayBroker   string
+	RelayOperator string
+}
+
 func buildAll(t *testing.T) (ageBin, ageKeygenBin, pluginBin, relayServerBin string) {
+	t.Helper()
+	bins := buildAllBinaries(t)
+	return bins.Age, bins.AgeKeygen, bins.Plugin, bins.RelayServer
+}
+
+func buildAllBinaries(t *testing.T) e2eBinaries {
 	t.Helper()
 
 	// Locate age binaries: two levels up from relay/ → ../../bin/
 	srcDir, _ := os.Getwd()
-	ageBin = filepath.Join(srcDir, "..", "..", "bin", "age")
-	ageKeygenBin = filepath.Join(srcDir, "..", "..", "bin", "age-keygen")
+	ageBin := filepath.Join(srcDir, "..", "..", "bin", "age")
+	ageKeygenBin := filepath.Join(srcDir, "..", "..", "bin", "age-keygen")
 	if _, err := os.Stat(ageBin); err != nil {
 		t.Skipf("age binary not found at %s — skipping E2E test", ageBin)
 	}
@@ -167,15 +184,160 @@ func buildAll(t *testing.T) (ageBin, ageKeygenBin, pluginBin, relayServerBin str
 	}
 
 	binDir := t.TempDir()
-	pluginBin = filepath.Join(binDir, "age-plugin-relay")
-	relayServerBin = filepath.Join(binDir, "relay-server")
-
-	// Build from the module root (one level up from relay/)
 	moduleRoot := filepath.Join(srcDir, "..")
-	gobuild(t, moduleRoot, "./cmd/age-plugin-relay/", pluginBin)
-	gobuild(t, moduleRoot, "./cmd/relay-server/", relayServerBin)
 
-	return
+	bins := e2eBinaries{
+		Age:           ageBin,
+		AgeKeygen:     ageKeygenBin,
+		Plugin:        filepath.Join(binDir, "age-plugin-relay"),
+		RelayServer:   filepath.Join(binDir, "relay-server"),
+		RelayBroker:   filepath.Join(binDir, "relay-broker"),
+		RelayOperator: filepath.Join(binDir, "relay-operator"),
+	}
+
+	gobuild(t, moduleRoot, "./cmd/age-plugin-relay/", bins.Plugin)
+	gobuild(t, moduleRoot, "./cmd/relay-server/", bins.RelayServer)
+	gobuild(t, moduleRoot, "./cmd/relay-broker/", bins.RelayBroker)
+	gobuild(t, moduleRoot, "./cmd/relay-operator/", bins.RelayOperator)
+
+	return bins
+}
+
+// startServer starts a relay-server and returns cleanup. Blocks until server is ready.
+func startServer(t *testing.T, serverBin, identityFile string, port int, extraArgs ...string) *exec.Cmd {
+	t.Helper()
+	args := []string{"-identity", identityFile, "-addr", fmt.Sprintf(":%d", port)}
+	args = append(args, extraArgs...)
+	cmd := exec.Command(serverBin, args...)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting relay-server: %v", err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	waitForServer(t, port)
+	return cmd
+}
+
+// startBroker starts a relay-broker and returns cleanup. Blocks until server is ready.
+func startBroker(t *testing.T, brokerBin string, port int, authToken, maxTTL string) *exec.Cmd {
+	t.Helper()
+	args := []string{"-addr", fmt.Sprintf(":%d", port)}
+	if authToken != "" {
+		args = append(args, "-auth-token", authToken)
+	}
+	if maxTTL != "" {
+		args = append(args, "-max-ttl", maxTTL)
+	}
+	cmd := exec.Command(brokerBin, args...)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting relay-broker: %v", err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	waitForServer(t, port)
+	return cmd
+}
+
+// startOperator starts a relay-operator in the background.
+func startOperator(t *testing.T, operatorBin, brokerURL, identityFile, tag string, authToken, pullInterval string) *exec.Cmd {
+	t.Helper()
+	args := []string{"--broker", brokerURL, "--identity", identityFile, "--tag", tag}
+	if authToken != "" {
+		args = append(args, "--auth-token", authToken)
+	}
+	if pullInterval != "" {
+		args = append(args, "--pull-interval", pullInterval)
+	}
+	cmd := exec.Command(operatorBin, args...)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting relay-operator: %v", err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	return cmd
+}
+
+// writeRelayConfig writes a relay-config.yaml for testing and returns the file path.
+func writeRelayConfig(t *testing.T, tmpDir, remoteName, url, unwrapRecipient string, extras map[string]string) string {
+	t.Helper()
+	configFile := filepath.Join(tmpDir, "relay-config.yaml")
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "remotes:\n  %s:\n    url: %s\n    unwrap_recipient: %s\n", remoteName, url, unwrapRecipient)
+	for k, v := range extras {
+		fmt.Fprintf(&buf, "    %s: %s\n", k, v)
+	}
+	os.WriteFile(configFile, []byte(buf.String()), 0644)
+	t.Logf("Config:\n%s", buf.String())
+	return configFile
+}
+
+// generateRelayKeys runs the plugin --generate and returns (recipient, identity).
+func generateRelayKeys(t *testing.T, pluginBin, remotePubKey, remoteName, configFile string) (string, string) {
+	t.Helper()
+	genCmd := exec.Command(pluginBin, "--generate", "--inner-recipient", remotePubKey, "--remote", remoteName)
+	genCmd.Env = append(os.Environ(), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
+	genOutBytes, err := genCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("--generate --remote: %v\n%s", err, genOutBytes)
+	}
+	genOut := string(genOutBytes)
+	relayRecipient := extractLine(t, genOut, "age1relay1")
+	relayIdentityStr := extractLine(t, genOut, "AGE-PLUGIN-RELAY-1")
+	t.Logf("Relay recipient: %s", truncate(relayRecipient, 50))
+	t.Logf("Relay identity:  %s", truncate(relayIdentityStr, 50))
+	return relayRecipient, relayIdentityStr
+}
+
+// encryptMessage encrypts plaintext with a relay recipient and returns the ciphertext file path.
+func encryptMessage(t *testing.T, ageBin, pluginBin, relayRecipient, plaintext, tmpDir string) string {
+	t.Helper()
+	ciphertextFile := filepath.Join(tmpDir, "secret.age")
+	encCmd := exec.Command(ageBin, "-r", relayRecipient, "-o", ciphertextFile)
+	encCmd.Stdin = strings.NewReader(plaintext)
+	encCmd.Env = pluginEnv(pluginBin)
+	if out, err := encCmd.CombinedOutput(); err != nil {
+		t.Fatalf("encrypt: %v\n%s", err, out)
+	}
+	t.Logf("Encrypted %d bytes", fileSize(t, ciphertextFile))
+	return ciphertextFile
+}
+
+// decryptMessage decrypts a ciphertext file using a relay identity and returns the plaintext.
+func decryptMessage(t *testing.T, ageBin, pluginBin, identityStr, ciphertextFile, configFile string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	identityFile := filepath.Join(tmpDir, "relay-identity.txt")
+	os.WriteFile(identityFile, []byte(identityStr+"\n"), 0600)
+
+	decCmd := exec.Command(ageBin, "-d", "-i", identityFile, ciphertextFile)
+	decCmd.Env = append(pluginEnv(pluginBin), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
+	decOutBytes, err := decCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("decrypt: %v\n%s", err, decOutBytes)
+	}
+	return strings.TrimRight(string(decOutBytes), "\n")
+}
+
+// decryptMessageExpectFailure decrypts and expects an error. Returns the combined output.
+func decryptMessageExpectFailure(t *testing.T, ageBin, pluginBin, identityStr, ciphertextFile, configFile string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	identityFile := filepath.Join(tmpDir, "relay-identity.txt")
+	os.WriteFile(identityFile, []byte(identityStr+"\n"), 0600)
+
+	decCmd := exec.Command(ageBin, "-d", "-i", identityFile, ciphertextFile)
+	decCmd.Env = append(pluginEnv(pluginBin), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
+	out, err := decCmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected decrypt to fail, but it succeeded: %s", out)
+	}
+	return string(out)
+}
+
+// computeTagB64 computes the base64 tag for a recipient (first 4 bytes of SHA256).
+func computeTagB64(innerRecipient string) string {
+	tag := ComputeTag(innerRecipient)
+	return base64.RawStdEncoding.EncodeToString(tag[:4])
 }
 
 func gobuild(t *testing.T, dir, pkg, output string) {
