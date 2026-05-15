@@ -20,14 +20,14 @@ type RelayIdentity struct {
 //
 // The payload after the 16-byte tag is a remote name, looked up in relay-config.yaml.
 func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
-	tag, target, err := DecodeIdentityData(data)
+	tag, remoteName, err := DecodeIdentityData(data)
 	if err != nil {
 		return nil, err
 	}
 
-	remote, err := ResolveRemote(target)
+	remote, err := ResolveRemote(remoteName)
 	if err != nil {
-		return nil, fmt.Errorf("resolving relay target %q: %w", target, err)
+		return nil, fmt.Errorf("resolving remote %q: %w", remoteName, err)
 	}
 
 	return &RelayIdentity{Tag: tag, Remote: remote}, nil
@@ -35,12 +35,12 @@ func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
 
 // ResolveRemote resolves a remote name to a RemoteConfig by looking it up
 // in the relay-config.yaml file.
-func ResolveRemote(target string) (RemoteConfig, error) {
+func ResolveRemote(remoteName string) (RemoteConfig, error) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return RemoteConfig{}, err
 	}
-	return cfg.LookupRemote(target)
+	return cfg.LookupRemote(remoteName)
 }
 
 // Unwrap finds relay stanzas matching this identity's tag, reconstructs the

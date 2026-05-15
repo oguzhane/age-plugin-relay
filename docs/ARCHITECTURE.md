@@ -9,7 +9,7 @@ Authoritative technical reference for `age-plugin-relay`. Covers wire protocol, 
 ```
 ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay required)
 
-  age1relay1<inner_recipient>                   AGE-PLUGIN-RELAY-1<tag + target>
+  age1relay1<inner_recipient>                   AGE-PLUGIN-RELAY-1<tag + remote_name>
     |                                             |
     v                                             v
   Extract inner recipient string                Receive relay stanzas from age header
@@ -18,7 +18,7 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
   age.ParseRecipients() -> Wrap()               Match stanzas by tag, reconstruct inner stanzas
     |                                             |
     v                                             v
-  Re-tag stanza: X25519 -> relay                Resolve target (remote name from config)
+  Re-tag stanza: X25519 -> relay                Resolve remote name (from config)
     |                                             |
     v                                             v
   Done. No network. Identity-agnostic.          Build encrypted payload → HTTP POST → decrypt response
@@ -58,7 +58,7 @@ The remote name is resolved from `relay-config.yaml`.
 
 Not secret. Contains no key material — only routing information. Safe to commit to version control.
 
-At decrypt time, the plugin looks up the target in `relay-config.yaml` to get the URL, `unwrap_recipient`, and other settings.
+At decrypt time, the plugin looks up the remote name in `relay-config.yaml` to get the URL, `unwrap_recipient`, and other settings.
 
 ### 2.3. Stanza format
 
@@ -99,7 +99,7 @@ All messages are JSON over `POST` to a single endpoint URL. Bearer auth uses `Au
 
 ### 3.1. Unwrap Recipient Resolution
 
-The plugin needs the operator's age recipient string to `age.Encrypt` the payload. At decrypt time, the identity only has a tag (irreversible hash) and a relay target. The inner recipient string is provided via the `unwrap_recipient` field in `relay-config.yaml`:
+The plugin needs the operator's age recipient string to `age.Encrypt` the payload. At decrypt time, the identity only has a tag (irreversible hash) and a remote name. The inner recipient string is provided via the `unwrap_recipient` field in `relay-config.yaml`:
 
 ```yaml
 remotes:
@@ -1047,7 +1047,7 @@ go test -v ./relay/
 | `TestComputeTagDeterministic` | Same input always produces same 16-byte tag |
 | `TestComputeTagDifferent` | Different inputs produce different tags |
 | `TestEncodeDecodeRecipient` | `age1relay1...` round-trips through Bech32 encode/decode |
-| `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and target preserved |
+| `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and remote name preserved |
 | `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, inner type `X25519` |
 
 #### Identity tests (`identity_test.go`)
