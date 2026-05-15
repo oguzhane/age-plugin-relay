@@ -235,7 +235,7 @@ func TestSSEHeartbeatOnly(t *testing.T) {
 	recipientStr := identity.Recipient().String()
 
 	stanza := &age.Stanza{Type: "X25519", Args: []string{"arg1"}, Body: []byte("body")}
-	remote := RemoteConfig{URL: server.URL, Stream: true, UnwrapRecipient: recipientStr, Timeout: "5s"}
+	remote := RemoteConfig{URL: server.URL, UnwrapRecipient: recipientStr, Timeout: "5s"}
 	_, err := PostToRelay(remote, []*age.Stanza{stanza}, recipientStr)
 	if err == nil {
 		t.Fatal("expected error for heartbeat-only stream")
@@ -259,7 +259,7 @@ func TestSSEErrorEvent(t *testing.T) {
 	recipientStr := identity.Recipient().String()
 
 	stanza := &age.Stanza{Type: "X25519", Args: []string{"arg1"}, Body: []byte("body")}
-	remote := RemoteConfig{URL: server.URL, Stream: true, UnwrapRecipient: recipientStr, Timeout: "5s"}
+	remote := RemoteConfig{URL: server.URL, UnwrapRecipient: recipientStr, Timeout: "5s"}
 	_, err := PostToRelay(remote, []*age.Stanza{stanza}, recipientStr)
 	if err == nil {
 		t.Fatal("expected error")
@@ -453,7 +453,7 @@ func TestEncryptedPayloadAsyncE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("operator decrypt: %v", err)
 	}
-	if err := VerifyRequestPayload(inner, reqCopy.Version, reqCopy.Action, reqCopy.Stream, reqCopy.IntentID, reqCopy.Tag, reqCopy.ExpiresAt, reqCopy.IntentClaimPub); err != nil {
+	if err := VerifyRequestPayload(inner, reqCopy.Version, reqCopy.Action, reqCopy.IntentID, reqCopy.Tag, reqCopy.ExpiresAt, reqCopy.IntentClaimPub); err != nil {
 		t.Fatalf("operator verify: %v", err)
 	}
 

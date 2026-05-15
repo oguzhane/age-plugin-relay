@@ -65,7 +65,7 @@ func TestEndToEndWithSSERelay(t *testing.T) {
 	}
 	recipientStr := identity.Recipient().String()
 
-	server := newMockRelayServer(t, identity)
+	server := newMockRelayServer(t, identity, true)
 	defer server.Close()
 
 	relayRecipient, err := NewRelayRecipient([]byte(recipientStr))
@@ -86,7 +86,6 @@ func TestEndToEndWithSSERelay(t *testing.T) {
 		Tag: tag,
 		Remote: RemoteConfig{
 			URL:             server.URL,
-			Stream:          true,
 			UnwrapRecipient: recipientStr,
 		},
 	}
@@ -120,7 +119,6 @@ func TestSSERelayError(t *testing.T) {
 		Tag: tag,
 		Remote: RemoteConfig{
 			URL:             server.URL,
-			Stream:          true,
 			UnwrapRecipient: recipientA,
 		},
 	}

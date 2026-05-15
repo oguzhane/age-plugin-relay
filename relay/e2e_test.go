@@ -52,10 +52,9 @@ func TestE2ESSEStream(t *testing.T) {
 
 	port := freePort(t)
 	relayURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	startServer(t, bins.RelayServer, remoteKeyFile, port)
+	startServer(t, bins.RelayServer, remoteKeyFile, port, "-stream")
 
 	configFile := writeRelayConfig(t, tmpDir, "sse-remote", relayURL, remotePubKey, map[string]string{
-		"stream":  "true",
 		"timeout": "30s",
 	})
 	relayRecipient, relayIdentityStr := generateRelayKeys(t, bins.Plugin, remotePubKey, "sse-remote", configFile)

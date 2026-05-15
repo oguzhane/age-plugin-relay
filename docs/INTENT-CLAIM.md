@@ -145,7 +145,7 @@ IntentClaimCanonical(1, "fulfill", "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c", "<encrypt
 `intent_claim_pub` is included in the request outer hash as a bound field (per the [Complete Outer Field Binding](ARCHITECTURE.md#35-outer-hash-construction) principle):
 
 ```
-SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")
+SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")
 ```
 
 This ensures the broker cannot substitute a different public key without detection by the operator.

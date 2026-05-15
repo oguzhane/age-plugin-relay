@@ -146,7 +146,7 @@ func processIntents(brokerURL, tag, authToken string, identities []age.Identity)
 		}
 
 		// 2. Verify outer hash and expiry.
-		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
+		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 			fmt.Fprintf(os.Stderr, "[relay-operator]   Verification failed: %v — rejecting\n", err)
 			if err := rejectIntent(brokerURL, intent.IntentID, inner.EphemeralKey, nil, authToken); err != nil {
 				fmt.Fprintf(os.Stderr, "[relay-operator]   Reject error: %v\n", err)

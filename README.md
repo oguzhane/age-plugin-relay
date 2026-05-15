@@ -132,7 +132,6 @@ remotes:
     tls_key: /path/to/client.key                # optional: mTLS client key
     tls_ca: /path/to/ca.crt                     # optional: custom CA
     timeout: 5m                                  # optional (default: 5m)
-    stream: true                                 # optional: SSE for long-running requests
     auth_token: my-bearer-token                  # optional: Bearer token
 ```
 

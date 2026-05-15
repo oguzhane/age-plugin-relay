@@ -12,8 +12,9 @@ import (
 )
 
 // newMockRelayServer starts a mock that handles encrypted payload: decrypt, verify,
-// unwrap, build response, seal.
-func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Server {
+// unwrap, build response, seal. When stream is true, responds with SSE format.
+func newMockRelayServer(t *testing.T, identity *age.X25519Identity, stream ...bool) *httptest.Server {
+	useSSE := len(stream) > 0 && stream[0]
 	t.Helper()
 	recipientStr := identity.Recipient().String()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +39,7 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		}
 
 		// Verify.
-		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
+		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(RelayResponse{Error: "verify: " + err.Error()})
 			return
@@ -63,7 +64,7 @@ func newMockRelayServer(t *testing.T, identity *age.X25519Identity) *httptest.Se
 		sealed, _ := SealResponse(*respInner, inner.EphemeralKey)
 
 		resp := RelayRequest{Version: 1, Action: "fulfill", IntentID: req.IntentID, EncryptedPayload: sealed}
-		if req.Stream {
+		if useSSE {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.WriteHeader(http.StatusOK)

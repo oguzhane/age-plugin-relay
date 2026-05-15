@@ -120,7 +120,6 @@ Every request to the broker/relay-server has at most these cleartext fields:
 | `action` | all | Routing: `unwrap`, `poll`, `pull`, `fulfill`, `reject` |
 | `intent_id` | unwrap, poll, fulfill, reject | Intent state machine |
 | `tag` | unwrap, pull | Operator routing |
-| `stream` | unwrap | Transport hint (SSE) |
 | `expires_at` | unwrap | Unix timestamp (seconds). Plugin-defined intent expiry. |
 | `intent_claim_pub` | unwrap | Ed25519 public key (base64). Per-intent authorization — see [Intent Claim](INTENT-CLAIM.md) |
 | `intent_claim_sig` | fulfill, reject | Ed25519 signature (base64). Proves operator decrypted the payload — see [Intent Claim](INTENT-CLAIM.md) |
@@ -135,7 +134,7 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
 ```json
 {
   "nonce": "<16 random bytes, hex>",
-  "outer_hash": "<SHA-256(version.action.stream.intent_id.tag.expires_at.intent_claim_pub), hex>",
+  "outer_hash": "<SHA-256(version.action.intent_id.tag.expires_at.intent_claim_pub), hex>",
   "stanzas": [
     { "type": "X25519", "args": ["..."], "body": "..." }
   ],
@@ -147,7 +146,7 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
 | Field | Description |
 |---|---|
 | `nonce` | 16 random bytes, hex-encoded. Ensures ciphertext uniqueness at the protocol level. Discarded after decryption. |
-| `outer_hash` | `SHA-256("version.action.stream.intent_id.tag.expires_at.intent_claim_pub")` — dot-separated, canonical. `stream` is `"0"` or `"1"`. Binds the encrypted payload to all outer routing fields including expiry and intent claim public key. |
+| `outer_hash` | `SHA-256("version.action.intent_id.tag.expires_at.intent_claim_pub")` — dot-separated, canonical. Binds the encrypted payload to all outer routing fields including expiry and intent claim public key. |
 | `stanzas` | Inner age stanzas (base64 raw standard bodies). |
 | `ephemeral_key` | Plugin's ephemeral age recipient string (`age1...`) for the response envelope. |
 | `intent_claim_secret` | Ed25519 private key seed (32 bytes, base64 raw standard). Only the operator (who decrypts) can extract this. See [Intent Claim](INTENT-CLAIM.md). |
@@ -200,7 +199,6 @@ The outer hash binds the encrypted blob to the cleartext routing fields. Any mod
 |---|---|
 | `version` | ✓ |
 | `action` | ✓ |
-| `stream` | ✓ (as `"0"` or `"1"`) |
 | `intent_id` | ✓ |
 | `tag` | ✓ |
 | `expires_at` | ✓ (as decimal string) |
@@ -219,13 +217,13 @@ The outer hash binds the encrypted blob to the cleartext routing fields. Any mod
 **Request outer hash** (verified by operator):
 
 ```
-SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")
+SHA-256("{version}.{action}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")
 ```
 
 Example:
 
 ```
-SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.AAAA...")
+SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.AAAA...")
 ```
 
 Dot separator. No JSON. No whitespace. `expires_at` as decimal string. `intent_claim_pub` as base64 raw standard (empty string if not set). Deterministic on both sides.
@@ -246,12 +244,12 @@ SHA-256("1.fulfill.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c")
 
 For long-running relay scenarios (approval flows, remote YubiKey touch), the server can respond with Server-Sent Events instead of a single JSON response. This keeps the connection alive through proxies and load balancers.
 
-SSE is enabled per-remote via the `stream` field in `relay-config.yaml`. When enabled, the plugin sends `"stream": true` in the request payload. The client detects the response type from `Content-Type`:
+SSE is enabled on the server side via the `-stream` CLI flag (e.g., `relay-server -identity keys.txt -stream`). The plugin auto-detects the response format from the `Content-Type` header:
 
 - `application/json` → standard JSON
 - `text/event-stream` → SSE stream
 
-Servers that don't support SSE simply ignore the `stream` field and return JSON.
+No plugin-side configuration is needed. Servers that don't use `-stream` return JSON.
 
 | Event | Data | Meaning |
 |---|---|---|
@@ -292,7 +290,6 @@ Authorization: Bearer <auth_token>
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
   "tag": "QPg24ggKk7xKd2t3c5rL9A",
   "expires_at": 1715350800,
-  "stream": true,
   "intent_claim_pub": "<base64: Ed25519 public key>",
   "encrypted_payload": "<base64: age-encrypted blob>"
 }
@@ -303,7 +300,6 @@ Authorization: Bearer <auth_token>
 - `intent_id`: Plugin-generated unique ID (16 random bytes, hex-encoded, 32 chars).
 - `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:16]`, base64).
 - `expires_at`: Unix timestamp (seconds) — intent expiry.
-- `stream`: Optional. If `true`, the client accepts SSE responses.
 - `intent_claim_pub`: Ed25519 public key (base64 raw standard). Per-intent authorization. See [Intent Claim](INTENT-CLAIM.md).
 - `encrypted_payload`: age-encrypted inner request payload (see §3.3). Opaque to the broker.
 
@@ -321,7 +317,7 @@ Authorization: Bearer <auth_token>
 1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
 2. Parse inner payload.
 3. Check `expires_at` from the outer fields — reject if in the past.
-4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at.intent_claim_pub")` from the outer fields.
+4. Recompute `SHA-256("version.action.intent_id.tag.expires_at.intent_claim_pub")` from the outer fields.
 5. Compare against `outer_hash` — mismatch = tampered = reject.
 6. Extract `stanzas` and `ephemeral_key`.
 7. `identity.Unwrap(stanzas)` → file key.
@@ -492,7 +488,7 @@ The operator receives the verbatim outer envelope from the broker and processes 
 1. `age.Decrypt(encrypted_payload, identity)` → inner request payload JSON.
 2. Parse inner payload.
 3. Check `expires_at` from the outer fields — reject if in the past.
-4. Recompute `SHA-256("version.action.stream.intent_id.tag.expires_at.intent_claim_pub")` from the outer fields.
+4. Recompute `SHA-256("version.action.intent_id.tag.expires_at.intent_claim_pub")` from the outer fields.
 5. Compare against `outer_hash` — mismatch = broker tampered = reject the intent.
 6. Extract `stanzas`, `ephemeral_key`, and `intent_claim_secret`.
 7. Reconstruct Ed25519 private key from `intent_claim_secret`.
@@ -872,7 +868,6 @@ remotes:
     tls_key: /path/to/client.key                   # optional (mTLS)
     tls_ca: /path/to/ca.crt                        # optional (custom CA)
     timeout: 5m                                    # optional (default: 5m)
-    stream: true                                   # optional (SSE for long-running requests)
     auth_token: my-bearer-token                    # optional (Bearer token for simple auth)
     poll_interval: 2s                              # optional; default min(timeout/60, 5s)
 
@@ -933,6 +928,7 @@ relay-server -identity keys.txt \
 |---|---|---|
 | `-identity <file>` | — | Age identity file (required) |
 | `-addr <addr>` | — | Listen address (default `:9876`) |
+| `-stream` | — | Respond with SSE (Server-Sent Events) instead of JSON. Useful for long-running unwrap operations (YubiKey touch, approval flows) |
 | `-tls-cert <file>` | — | TLS server certificate (enables HTTPS) |
 | `-tls-key <file>` | — | TLS server private key |
 | `-tls-ca <file>` | — | CA cert for client verification (enables mTLS) |

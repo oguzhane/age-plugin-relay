@@ -32,6 +32,7 @@ func main() {
 	tlsKey := ""
 	tlsCA := ""
 	authToken := ""
+	stream := false
 
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
@@ -65,6 +66,8 @@ func main() {
 			if i < len(os.Args) {
 				authToken = os.Args[i]
 			}
+		case "-stream":
+			stream = true
 		}
 	}
 
@@ -77,6 +80,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  -tls-key <file>     TLS server private key (required with -tls-cert)\n")
 		fmt.Fprintf(os.Stderr, "  -tls-ca <file>      CA certificate for client verification (enables mTLS)\n")
 		fmt.Fprintf(os.Stderr, "  -auth-token <token>  Required Bearer token for all requests\n")
+		fmt.Fprintf(os.Stderr, "  -stream              Respond with SSE (Server-Sent Events) instead of JSON\n")
 		os.Exit(1)
 	}
 
@@ -119,7 +123,7 @@ func main() {
 			return
 		}
 
-		fmt.Fprintf(os.Stderr, "[relay-server] Received action=%s, version=%d, stream=%v\n", req.Action, req.Version, req.Stream)
+		fmt.Fprintf(os.Stderr, "[relay-server] Received action=%s, version=%d\n", req.Action, req.Version)
 
 		if req.Version != 1 {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: fmt.Sprintf("unsupported protocol version: %d", req.Version)})
@@ -144,7 +148,7 @@ func main() {
 		}
 
 		// 2. Verify outer hash and expiry.
-		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
+		if err := relay.VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 			writeJSON(w, http.StatusBadRequest, relay.RelayResponse{Error: "payload verification: " + err.Error()})
 			return
 		}
@@ -187,7 +191,7 @@ func main() {
 
 				resp := relay.RelayRequest{Version: 1, Action: "fulfill", IntentID: req.IntentID, EncryptedPayload: sealed}
 
-				if req.Stream {
+				if stream {
 					writeSSE(w, "result", resp)
 				} else {
 					writeJSON(w, http.StatusOK, resp)

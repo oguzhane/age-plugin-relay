@@ -279,7 +279,7 @@ func TestEncryptedPayloadSyncE2EWithSSE(t *testing.T) {
 	identity, _ := age.GenerateX25519Identity()
 	recipientStr := identity.Recipient().String()
 
-	server := newMockRelayServer(t, identity)
+	server := newMockRelayServer(t, identity, true)
 	defer server.Close()
 
 	relayRecipient, _ := NewRelayRecipient([]byte(recipientStr))
@@ -293,7 +293,7 @@ func TestEncryptedPayloadSyncE2EWithSSE(t *testing.T) {
 	tag := ComputeTag(recipientStr)
 	relayIdentity := &RelayIdentity{
 		Tag:    tag,
-		Remote: RemoteConfig{URL: server.URL, Stream: true, UnwrapRecipient: recipientStr},
+		Remote: RemoteConfig{URL: server.URL, UnwrapRecipient: recipientStr},
 	}
 
 	r, err := age.Decrypt(bytes.NewReader(ciphertext.Bytes()), relayIdentity)
@@ -324,7 +324,7 @@ func TestBrokerBlindnessVerification(t *testing.T) {
 			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
 			return
 		}
-		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.Stream, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
+		if err := VerifyRequestPayload(inner, req.Version, req.Action, req.IntentID, req.Tag, req.ExpiresAt, req.IntentClaimPub); err != nil {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(RelayResponse{Error: err.Error()})
 			return

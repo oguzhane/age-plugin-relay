@@ -51,7 +51,7 @@ type asyncPollResponse struct {
 type RelayRequest struct {
 	Version          int    `json:"version"`
 	Action           string `json:"action"`
-	Stream           bool   `json:"stream,omitempty"`            // request SSE response
+	Stream           bool   `json:"stream,omitempty"`            // deprecated: server decides response format
 	IntentID         string `json:"intent_id,omitempty"`         // plugin-generated, 16 random bytes hex
 	Tag              string `json:"tag,omitempty"`               // routing tag for operator pull
 	ExpiresAt        int64  `json:"expires_at,omitempty"`         // Unix timestamp (seconds)
@@ -119,7 +119,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	}
 
 	// Build and encrypt inner payload.
-	inner, err := BuildRequestPayload(1, "unwrap", remote.Stream, intentID, tag, expiresAt, relayStanzas, ephemeralRecipient, claimPubB64)
+	inner, err := BuildRequestPayload(1, "unwrap", intentID, tag, expiresAt, relayStanzas, ephemeralRecipient, claimPubB64)
 	if err != nil {
 		return nil, fmt.Errorf("building inner payload: %w", err)
 	}
@@ -134,7 +134,6 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	req := RelayRequest{
 		Version:          1,
 		Action:           "unwrap",
-		Stream:           remote.Stream,
 		IntentID:         intentID,
 		Tag:              tag,
 		ExpiresAt:        expiresAt,
