@@ -94,18 +94,6 @@ func TestIntegrationConfigMissingRemote(t *testing.T) {
 	t.Logf("Got expected error: %v", err)
 }
 
-func TestIntegrationNoConfigFile(t *testing.T) {
-	t.Setenv("AGE_PLUGIN_RELAY_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
-
-	remote, err := ResolveRemote("https://example.com/unwrap")
-	if err != nil {
-		t.Fatalf("URL-based resolve should work without config: %v", err)
-	}
-	if remote.URL != "https://example.com/unwrap" {
-		t.Fatalf("URL mismatch: %q", remote.URL)
-	}
-}
-
 func TestIntegrationRelayServerDown(t *testing.T) {
 	remoteIdentity, _ := age.GenerateX25519Identity()
 	remotePubKey := remoteIdentity.Recipient().String()

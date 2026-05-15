@@ -39,7 +39,7 @@ go test ./relay -run 'TestE2E' -v                    # E2E tests (sync, async, T
 All binaries share this package:
 - **client.go** — HTTP client, intent ID generation, relay request/response handling
 - **recipient.go** — Parses `age1relay1<bech32(inner_recipient)>` recipients
-- **identity.go** — Parses `AGE-PLUGIN-RELAY-1<bech32(tag||target)>` identities, resolves remote config
+- **identity.go** — Parses `AGE-PLUGIN-RELAY-1<bech32(tag||remote_name)>` identities, resolves remote config
 - **payload.go** — Encrypted payload (inner/outer layers) with outer hash binding for tamper detection
 - **claim.go** — Ed25519 intent claim signing/verification for async authorization
 - **envelope.go** — Codec for converting between age stanzas and relay wire format

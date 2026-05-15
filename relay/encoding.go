@@ -26,21 +26,21 @@ func EncodeRelayRecipient(innerRecipient string) string {
 }
 
 // EncodeRelayIdentity produces an AGE-PLUGIN-RELAY-1... string from a tag and
-// a target (either a relay URL or a remote name).
-func EncodeRelayIdentity(tag [TagSize]byte, target string) string {
-	data := make([]byte, TagSize+len(target))
+// a remote name.
+func EncodeRelayIdentity(tag [TagSize]byte, remoteName string) string {
+	data := make([]byte, TagSize+len(remoteName))
 	copy(data[:TagSize], tag[:])
-	copy(data[TagSize:], target)
+	copy(data[TagSize:], remoteName)
 	return plugin.EncodeIdentity(PluginName, data)
 }
 
 // DecodeIdentityData parses the Bech32 payload of an AGE-PLUGIN-RELAY-1... identity
-// into a tag and target string (URL or remote name).
-func DecodeIdentityData(data []byte) (tag [TagSize]byte, target string, err error) {
-	if len(data) < TagSize+1 { // TagSize bytes tag + at least 1 byte target
+// into a tag and remote name.
+func DecodeIdentityData(data []byte) (tag [TagSize]byte, remoteName string, err error) {
+	if len(data) < TagSize+1 { // TagSize bytes tag + at least 1 byte remote name
 		return tag, "", ErrShortIdentityData
 	}
 	copy(tag[:], data[:TagSize])
-	target = string(data[TagSize:])
-	return tag, target, nil
+	remoteName = string(data[TagSize:])
+	return tag, remoteName, nil
 }

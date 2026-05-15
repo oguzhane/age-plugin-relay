@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"os"
-	"strings"
 
 	"filippo.io/age"
 )
 
-// RelayIdentity matches relay stanzas by tag and forwards them to a relay URL
-// for unwrapping by a remote identity.
+// RelayIdentity matches relay stanzas by tag and forwards them to a remote
+// relay server for unwrapping.
 type RelayIdentity struct {
 	Tag    [TagSize]byte
 	Remote RemoteConfig
@@ -20,9 +18,7 @@ type RelayIdentity struct {
 // NewRelayIdentity creates a RelayIdentity from the raw Bech32 data payload
 // of an AGE-PLUGIN-RELAY-1... identity string.
 //
-// The payload after the 16-byte tag is either:
-//   - A full URL (starts with "http://" or "https://") — legacy mode
-//   - A remote name — looked up in relay-config.yaml
+// The payload after the 16-byte tag is a remote name, looked up in relay-config.yaml.
 func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
 	tag, target, err := DecodeIdentityData(data)
 	if err != nil {
@@ -37,16 +33,9 @@ func NewRelayIdentity(data []byte) (*RelayIdentity, error) {
 	return &RelayIdentity{Tag: tag, Remote: remote}, nil
 }
 
-// ResolveRemote resolves a target string to a RemoteConfig.
-// If it's a URL, wrap it directly. Otherwise, look it up in the config file.
+// ResolveRemote resolves a remote name to a RemoteConfig by looking it up
+// in the relay-config.yaml file.
 func ResolveRemote(target string) (RemoteConfig, error) {
-	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
-		if strings.HasPrefix(target, "http://") {
-			fmt.Fprintf(os.Stderr, "WARNING: relay URL uses plaintext HTTP — file keys will be transmitted unencrypted\n")
-		}
-		return RemoteConfig{URL: target}, nil
-	}
-
 	cfg, err := LoadConfig()
 	if err != nil {
 		return RemoteConfig{}, err
@@ -55,7 +44,7 @@ func ResolveRemote(target string) (RemoteConfig, error) {
 }
 
 // Unwrap finds relay stanzas matching this identity's tag, reconstructs the
-// inner stanzas, and forwards them to the relay URL for decryption.
+// inner stanzas, and forwards them to the remote relay server for decryption.
 func (id *RelayIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 	var matched []*age.Stanza
 

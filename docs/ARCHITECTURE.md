@@ -47,14 +47,14 @@ The inner recipient can be any age recipient type:
 | YubiKey P-256 | `age1yubikey1q...` | Yes: `age-plugin-yubikey` |
 | Any plugin | `age1NAME1...` | Yes: `age-plugin-NAME` |
 
-### 2.2. Identity: `AGE-PLUGIN-RELAY-1<bech32(tag || target)>`
+### 2.2. Identity: `AGE-PLUGIN-RELAY-1<bech32(tag || remote_name)>`
 
-The target is a remote name resolved from `relay-config.yaml`.
+The remote name is resolved from `relay-config.yaml`.
 
 | Field | Size | Description |
 |---|---|---|
 | `tag` | 16 bytes | `SHA-256(inner_recipient_string)[:16]` — matches stanzas to this identity |
-| `target` | variable | Remote name (`myserver`) |
+| `remote_name` | variable | Remote name (`myserver`) |
 
 Not secret. Contains no key material — only routing information. Safe to commit to version control.
 
@@ -108,7 +108,7 @@ remotes:
     unwrap_recipient: age1abc...    # age recipient of the unwrapper
 ```
 
-This is the same public key the relay recipient was created with. The identity format is unchanged (`tag || target`). Config mode is required — legacy URL-only identities are not supported with encrypted payload.
+This is the same public key the relay recipient was created with. The identity format is unchanged (`tag || remote_name`).
 
 ### 3.2. Outer Envelope
 

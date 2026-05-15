@@ -46,9 +46,9 @@ func TestEncodeDecodeIdentity(t *testing.T) {
 	for i := range tag {
 		tag[i] = byte(i + 1)
 	}
-	url := "https://relay.example.com:8443/unwrap"
+	remoteName := "myserver"
 
-	encoded := EncodeRelayIdentity(tag, url)
+	encoded := EncodeRelayIdentity(tag, remoteName)
 	if !strings.HasPrefix(encoded, "AGE-PLUGIN-RELAY-1") {
 		t.Fatalf("expected AGE-PLUGIN-RELAY-1 prefix, got %s", encoded)
 	}
@@ -58,15 +58,15 @@ func TestEncodeDecodeIdentity(t *testing.T) {
 		t.Fatalf("parsing encoded identity: %v", err)
 	}
 
-	gotTag, gotTarget, err := DecodeIdentityData(data)
+	gotTag, gotRemote, err := DecodeIdentityData(data)
 	if err != nil {
 		t.Fatalf("decoding identity data: %v", err)
 	}
 	if gotTag != tag {
 		t.Fatalf("tag mismatch: %x vs %x", gotTag, tag)
 	}
-	if gotTarget != url {
-		t.Fatalf("target mismatch: %q vs %q", gotTarget, url)
+	if gotRemote != remoteName {
+		t.Fatalf("remote name mismatch: %q vs %q", gotRemote, remoteName)
 	}
 }
 

@@ -181,26 +181,6 @@ func TestUnwrapMissingUnwrapRecipient(t *testing.T) {
 
 // ── ResolveRemote ───────────────────────────────────────────────────────────
 
-func TestResolveRemoteHTTPWarning(t *testing.T) {
-	remote, err := ResolveRemote("http://example.com/unwrap")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if remote.URL != "http://example.com/unwrap" {
-		t.Fatalf("URL mismatch: %q", remote.URL)
-	}
-}
-
-func TestResolveRemoteHTTPS(t *testing.T) {
-	remote, err := ResolveRemote("https://example.com/unwrap")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if remote.URL != "https://example.com/unwrap" {
-		t.Fatalf("URL mismatch: %q", remote.URL)
-	}
-}
-
 func TestResolveRemoteNamedNotFound(t *testing.T) {
 	t.Setenv("AGE_PLUGIN_RELAY_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	_, err := ResolveRemote("myremote")

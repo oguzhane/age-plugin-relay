@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Key Management:
 #   keygen                              Generate a new X25519 key pair
-#   generate --recipient <age1...> (--remote <name> | --relay-url <url>)
+#   generate --recipient <age1...> --remote <name>
 #                                       Generate relay recipient + identity
 #   tag --recipient <age1...>           Compute routing tag for a recipient
 #
@@ -263,12 +263,11 @@ cmd_keygen() {
 cmd_generate() {
     ensure_plugin
 
-    local recipient="" relay_url="" remote_name="" config=""
+    local recipient="" remote_name="" config=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --recipient|-r) recipient="$2"; shift 2 ;;
-            --relay-url)    relay_url="$2"; shift 2 ;;
             --remote)       remote_name="$2"; shift 2 ;;
             --config)       config="$2"; shift 2 ;;
             *) die "Unknown option: $1" ;;
@@ -276,15 +275,9 @@ cmd_generate() {
     done
 
     [ -n "$recipient" ] || die "Missing --recipient <age1...>"
-    [ -n "$relay_url" ] || [ -n "$remote_name" ] || die "Missing --relay-url <url> or --remote <name>"
-    [ -z "$relay_url" ] || [ -z "$remote_name" ] || die "--relay-url and --remote are mutually exclusive"
+    [ -n "$remote_name" ] || die "Missing --remote <name>"
 
-    local args=("--generate" "--inner-recipient" "$recipient")
-    if [ -n "$relay_url" ]; then
-        args+=("--relay-url" "$relay_url")
-    else
-        args+=("--remote" "$remote_name")
-    fi
+    local args=("--generate" "--inner-recipient" "$recipient" "--remote" "$remote_name")
 
     local output
     if [ -n "$config" ]; then
@@ -628,7 +621,7 @@ cmd_help() {
     echo ""
     echo -e "${BOLD}Key Management:${NC}"
     echo "  keygen                                Generate a new X25519 key pair"
-    echo "  generate --recipient <age1...> (--remote <name> | --relay-url <url>) [--config <file>]"
+    echo "  generate --recipient <age1...> --remote <name> [--config <file>]"
     echo "                                        Generate relay recipient + identity"
     echo "  tag --recipient <age1...>             Compute routing tag for a recipient"
     echo ""
@@ -651,7 +644,7 @@ cmd_help() {
     echo ""
     echo -e "  ${DIM}# Sync flow: generate keys → start server → encrypt → decrypt${NC}"
     echo "  relayctl keygen"
-    echo "  relayctl generate --recipient age1... --relay-url http://localhost:19876"
+    echo "  relayctl generate --recipient age1... --remote myserver"
     echo "  relayctl server start --identity workspace/identity.txt"
     echo "  echo 'hello' | relayctl encrypt -r age1relay1... -o secret.age"
     echo "  relayctl decrypt -i workspace/relay-identity.txt -f secret.age"

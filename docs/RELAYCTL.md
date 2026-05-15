@@ -30,25 +30,18 @@ Prints the public key and suggests the next step.
 Generate a relay recipient (for encryption) and relay identity (for decryption) from an inner recipient.
 
 ```bash
-# Config mode (recommended — supports encrypted payloads, async flow)
-relayctl generate --recipient <age1...> --remote <name> --config <relay-config.yaml>
-
-# Legacy URL mode (direct relay-server URL embedded in identity)
-relayctl generate --recipient <age1...> --relay-url <url>
+relayctl generate --recipient <age1...> --remote <name> [--config <relay-config.yaml>]
 ```
 
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--recipient`, `-r` | Yes | Inner age recipient (e.g., `age1...`) |
-| `--remote` | One of | Remote name from `relay-config.yaml` |
-| `--relay-url` | One of | Direct relay endpoint URL (legacy) |
+| `--remote` | Yes | Remote name from `relay-config.yaml` |
 | `--config` | No | Path to `relay-config.yaml` |
 
 Output:
 - `workspace/relay-recipient.txt`
 - `workspace/relay-identity.txt`
-
-`--remote` and `--relay-url` are mutually exclusive.
 
 ---
 
