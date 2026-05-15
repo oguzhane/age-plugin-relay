@@ -60,6 +60,8 @@ Or build individually:
 ```bash
 go build -o bin/age-plugin-relay ./cmd/age-plugin-relay/
 go build -o bin/relay-server ./cmd/relay-server/
+go build -o bin/relay-broker ./cmd/relay-broker/
+go build -o bin/relay-operator ./cmd/relay-operator/
 ```
 
 Place the plugin binary in your `PATH` so age can discover it:
@@ -76,9 +78,9 @@ age-keygen -o identity.txt
 # => created: age1abc...
 
 # Generate a relay recipient + identity pointing to a remote
-age-plugin-relay --generate \
-  --inner-recipient "age1abc..." \
-  --remote myserver
+age-plugin-relay -generate \
+  -inner-recipient "age1abc..." \
+  -remote myserver
 ```
 
 Output:
