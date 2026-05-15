@@ -63,6 +63,7 @@ warn()  { echo -e "${YELLOW}  ⚠ ${NC}$1"; }
 err()   { echo -e "${RED}  ✗ ${NC}$1" >&2; }
 die()   { err "$1"; exit 1; }
 header(){ echo -e "\n${BOLD}$1${NC}"; }
+runcmd(){ echo -e "${DIM}  \$ $*${NC}"; }
 
 # ── Workspace ────────────────────────────────────────────────────────────────
 
@@ -131,6 +132,7 @@ start_daemon() {
         rm -f "$pidfile"
     fi
 
+    runcmd "$binary" "$@"
     "$binary" "$@" > "$logfile" 2>&1 &
     local pid=$!
     echo "$pid" > "$pidfile"
@@ -248,6 +250,7 @@ cmd_keygen() {
         ((i++))
     done
 
+    runcmd "$AGE_KEYGEN" -o "$output"
     "$AGE_KEYGEN" -o "$output" 2>/dev/null
 
     local pubkey
@@ -279,21 +282,31 @@ cmd_generate() {
 
     local args=("--generate" "--inner-recipient" "$recipient" "--remote" "$remote_name")
 
+    ensure_workspace
+    local err_file="${WORKSPACE}/generate-err.tmp"
     local output
+    runcmd "$PLUGIN_BIN" "${args[@]}"
     if [ -n "$config" ]; then
-        output=$(AGE_PLUGIN_RELAY_CONFIG="$config" "$PLUGIN_BIN" "${args[@]}" 2>/dev/null)
+        output=$(AGE_PLUGIN_RELAY_CONFIG="$config" "$PLUGIN_BIN" "${args[@]}" 2>"$err_file") || true
     else
-        output=$("$PLUGIN_BIN" "${args[@]}" 2>/dev/null)
+        output=$("$PLUGIN_BIN" "${args[@]}" 2>"$err_file") || true
     fi
 
     local relay_recipient relay_identity
     relay_recipient=$(echo "$output" | grep "^age1relay1" || true)
     relay_identity=$(echo "$output" | grep "^AGE-PLUGIN-RELAY-1" || true)
 
-    [ -n "$relay_recipient" ] || die "Failed to generate relay recipient"
-    [ -n "$relay_identity" ]  || die "Failed to generate relay identity"
-
-    ensure_workspace
+    if [ -z "$relay_recipient" ] || [ -z "$relay_identity" ]; then
+        local err_msg
+        err_msg=$(cat "$err_file" 2>/dev/null || true)
+        rm -f "$err_file"
+        if [ -n "$err_msg" ]; then
+            die "Failed to generate relay keys: ${err_msg}"
+        else
+            die "Failed to generate relay keys (no output from plugin)"
+        fi
+    fi
+    rm -f "$err_file"
 
     # Save to workspace
     echo "$relay_recipient" > "${WORKSPACE}/relay-recipient.txt"
@@ -488,12 +501,17 @@ cmd_operator() {
             info "Identity: ${identity}"
             info "Tag:      ${tag}"
 
+            runcmd "$OPERATOR_BIN" \
+                --broker "$broker_url" \
+                --identity "$identity" \
+                --tag "$tag" \
+                "${extra_args[@]+"${extra_args[@]}"}"
             "$OPERATOR_BIN" \
                 --broker "$broker_url" \
                 --identity "$identity" \
                 --tag "$tag" \
                 "${extra_args[@]+"${extra_args[@]}"}"
-            pass "Operator completed"
+            ok "Operator completed"
             ;;
         status)
             daemon_status "relay-operator"
@@ -529,8 +547,10 @@ cmd_encrypt() {
     [ -n "$outfile" ] && age_args+=("-o" "$outfile")
 
     if [ -n "$infile" ]; then
+        runcmd "$AGE" "${age_args[@]}" "<" "$infile"
         "$AGE" "${age_args[@]}" < "$infile"
     else
+        runcmd "$AGE" "${age_args[@]}"
         "$AGE" "${age_args[@]}"
     fi
 
@@ -569,6 +589,7 @@ cmd_decrypt() {
     [ -n "$outfile" ] && age_args+=("-o" "$outfile")
     [ -n "$ciphertext" ] && age_args+=("$ciphertext")
 
+    runcmd "$AGE" "${age_args[@]}"
     "$AGE" "${age_args[@]}"
 }
 
@@ -612,6 +633,7 @@ cmd_build() {
         local output="${BIN_DIR}/${name}"
 
         info "Building ${name}..."
+        runcmd go build -o "$output" "${module_root}/${pkg}"
         go build -o "$output" "${module_root}/${pkg}" || die "Failed to build ${name}"
         ok "${name} → ${output}"
     done
