@@ -12,69 +12,27 @@ import (
 	"time"
 )
 
-// TestE2EConfigMode exercises the full user flow with relay-config.yaml.
-func TestE2EConfigMode(t *testing.T) {
-	ageBin, ageKeygenBin, pluginBin, relayServerBin := buildAll(t)
+// TestE2ESyncHappyPath exercises the full sync flow: encrypt → relay-server → decrypt.
+func TestE2ESyncHappyPath(t *testing.T) {
+	bins := buildAllBinaries(t)
 	tmpDir := t.TempDir()
 
 	remoteKeyFile := filepath.Join(tmpDir, "remote.key")
-	run(t, ageKeygenBin, "-o", remoteKeyFile)
+	run(t, bins.AgeKeygen, "-o", remoteKeyFile)
 	remotePubKey := extractPublicKey(t, remoteKeyFile)
 
 	port := freePort(t)
 	relayURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	startServer(t, bins.RelayServer, remoteKeyFile, port)
 
-	relayCmd := exec.Command(relayServerBin, "-identity", remoteKeyFile, "-addr", fmt.Sprintf(":%d", port))
-	relayCmd.Stderr = os.Stderr
-	if err := relayCmd.Start(); err != nil {
-		t.Fatalf("starting relay-server: %v", err)
-	}
-	t.Cleanup(func() { relayCmd.Process.Kill(); relayCmd.Wait() })
-	waitForServer(t, port)
-
-	configFile := filepath.Join(tmpDir, "relay-config.yaml")
-	configContent := fmt.Sprintf("remotes:\n  myremote:\n    url: %s\n    unwrap_recipient: %s\n    timeout: 30s\n", relayURL, remotePubKey)
-	os.WriteFile(configFile, []byte(configContent), 0644)
-	t.Logf("Config:\n%s", configContent)
-
-	genCmd := exec.Command(pluginBin, "--generate", "--inner-recipient", remotePubKey, "--remote", "myremote")
-	genCmd.Env = append(os.Environ(), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
-	genOutBytes, err := genCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("--generate --remote: %v\n%s", err, genOutBytes)
-	}
-	genOut := string(genOutBytes)
-
-	relayRecipient := extractLine(t, genOut, "age1relay1")
-	relayIdentityStr := extractLine(t, genOut, "AGE-PLUGIN-RELAY-1")
-	t.Logf("Relay recipient: %s", truncate(relayRecipient, 50))
-	t.Logf("Relay identity:  %s", truncate(relayIdentityStr, 50))
-
-	if strings.Contains(relayIdentityStr, "127.0.0.1") {
-		t.Fatalf("config-mode identity should NOT contain URL, got: %s", relayIdentityStr)
-	}
-
-	identityFile := filepath.Join(tmpDir, "relay-identity.txt")
-	os.WriteFile(identityFile, []byte(relayIdentityStr+"\n"), 0600)
+	configFile := writeRelayConfig(t, tmpDir, "myremote", relayURL, remotePubKey, map[string]string{
+		"timeout": "30s",
+	})
+	relayRecipient, relayIdentityStr := generateRelayKeys(t, bins.Plugin, remotePubKey, "myremote", configFile)
 
 	plaintext := "E2E config: named remote 'myremote' — " + time.Now().Format(time.RFC3339Nano)
-	ciphertextFile := filepath.Join(tmpDir, "secret.age")
-
-	encCmd := exec.Command(ageBin, "-r", relayRecipient, "-o", ciphertextFile)
-	encCmd.Stdin = strings.NewReader(plaintext)
-	encCmd.Env = pluginEnv(pluginBin)
-	if out, err := encCmd.CombinedOutput(); err != nil {
-		t.Fatalf("encrypt: %v\n%s", err, out)
-	}
-	t.Logf("Encrypted %d bytes", fileSize(t, ciphertextFile))
-
-	decCmd := exec.Command(ageBin, "-d", "-i", identityFile, ciphertextFile)
-	decCmd.Env = append(pluginEnv(pluginBin), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
-	decOutBytes, err := decCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("decrypt: %v\n%s", err, decOutBytes)
-	}
-	decrypted := strings.TrimRight(string(decOutBytes), "\n")
+	ciphertextFile := encryptMessage(t, bins.Age, bins.Plugin, relayRecipient, plaintext, tmpDir)
+	decrypted := decryptMessage(t, bins.Age, bins.Plugin, relayIdentityStr, ciphertextFile, configFile)
 	t.Logf("Decrypted: %q", decrypted)
 
 	if decrypted != plaintext {
@@ -85,65 +43,26 @@ func TestE2EConfigMode(t *testing.T) {
 // TestE2ESSEStream exercises the full user flow with SSE streaming enabled
 // via relay-config.yaml stream: true.
 func TestE2ESSEStream(t *testing.T) {
-	ageBin, ageKeygenBin, pluginBin, relayServerBin := buildAll(t)
+	bins := buildAllBinaries(t)
 	tmpDir := t.TempDir()
 
 	remoteKeyFile := filepath.Join(tmpDir, "remote.key")
-	run(t, ageKeygenBin, "-o", remoteKeyFile)
+	run(t, bins.AgeKeygen, "-o", remoteKeyFile)
 	remotePubKey := extractPublicKey(t, remoteKeyFile)
-	t.Logf("Remote public key: %s", remotePubKey)
 
 	port := freePort(t)
 	relayURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	startServer(t, bins.RelayServer, remoteKeyFile, port)
 
-	relayCmd := exec.Command(relayServerBin, "-identity", remoteKeyFile, "-addr", fmt.Sprintf(":%d", port))
-	relayCmd.Stderr = os.Stderr
-	if err := relayCmd.Start(); err != nil {
-		t.Fatalf("starting relay-server: %v", err)
-	}
-	t.Cleanup(func() { relayCmd.Process.Kill(); relayCmd.Wait() })
-	waitForServer(t, port)
-	t.Logf("Relay server listening on :%d", port)
-
-	configFile := filepath.Join(tmpDir, "relay-config.yaml")
-	configContent := fmt.Sprintf("remotes:\n  sse-remote:\n    url: %s\n    unwrap_recipient: %s\n    stream: true\n    timeout: 30s\n", relayURL, remotePubKey)
-	os.WriteFile(configFile, []byte(configContent), 0644)
-	t.Logf("Config:\n%s", configContent)
-
-	genCmd := exec.Command(pluginBin, "--generate", "--inner-recipient", remotePubKey, "--remote", "sse-remote")
-	genCmd.Env = append(os.Environ(), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
-	genOutBytes, err := genCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("--generate --remote: %v\n%s", err, genOutBytes)
-	}
-	genOut := string(genOutBytes)
-
-	relayRecipient := extractLine(t, genOut, "age1relay1")
-	relayIdentityStr := extractLine(t, genOut, "AGE-PLUGIN-RELAY-1")
-	t.Logf("Relay recipient: %s", truncate(relayRecipient, 50))
-	t.Logf("Relay identity:  %s", truncate(relayIdentityStr, 50))
-
-	identityFile := filepath.Join(tmpDir, "relay-identity.txt")
-	os.WriteFile(identityFile, []byte(relayIdentityStr+"\n"), 0600)
+	configFile := writeRelayConfig(t, tmpDir, "sse-remote", relayURL, remotePubKey, map[string]string{
+		"stream":  "true",
+		"timeout": "30s",
+	})
+	relayRecipient, relayIdentityStr := generateRelayKeys(t, bins.Plugin, remotePubKey, "sse-remote", configFile)
 
 	plaintext := "E2E SSE: streaming relay with heartbeats — " + time.Now().Format(time.RFC3339Nano)
-	ciphertextFile := filepath.Join(tmpDir, "secret.age")
-
-	encCmd := exec.Command(ageBin, "-r", relayRecipient, "-o", ciphertextFile)
-	encCmd.Stdin = strings.NewReader(plaintext)
-	encCmd.Env = pluginEnv(pluginBin)
-	if out, err := encCmd.CombinedOutput(); err != nil {
-		t.Fatalf("encrypt: %v\n%s", err, out)
-	}
-	t.Logf("Encrypted %d bytes", fileSize(t, ciphertextFile))
-
-	decCmd := exec.Command(ageBin, "-d", "-i", identityFile, ciphertextFile)
-	decCmd.Env = append(pluginEnv(pluginBin), "AGE_PLUGIN_RELAY_CONFIG="+configFile)
-	decOutBytes, err := decCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("decrypt (SSE): %v\n%s", err, decOutBytes)
-	}
-	decrypted := strings.TrimRight(string(decOutBytes), "\n")
+	ciphertextFile := encryptMessage(t, bins.Age, bins.Plugin, relayRecipient, plaintext, tmpDir)
+	decrypted := decryptMessage(t, bins.Age, bins.Plugin, relayIdentityStr, ciphertextFile, configFile)
 	t.Logf("Decrypted via SSE: %q", decrypted)
 
 	if decrypted != plaintext {
@@ -161,12 +80,6 @@ type e2eBinaries struct {
 	RelayServer   string
 	RelayBroker   string
 	RelayOperator string
-}
-
-func buildAll(t *testing.T) (ageBin, ageKeygenBin, pluginBin, relayServerBin string) {
-	t.Helper()
-	bins := buildAllBinaries(t)
-	return bins.Age, bins.AgeKeygen, bins.Plugin, bins.RelayServer
 }
 
 func buildAllBinaries(t *testing.T) e2eBinaries {
@@ -357,16 +270,6 @@ func run(t *testing.T, name string, args ...string) {
 	}
 }
 
-func runCapture(t *testing.T, name string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
-	}
-	return string(out)
-}
-
 func pluginEnv(pluginBin string) []string {
 	env := os.Environ()
 	pluginDir := filepath.Dir(pluginBin)
@@ -431,16 +334,6 @@ func fileSize(t *testing.T, path string) int64 {
 	t.Helper()
 	info, _ := os.Stat(path)
 	return info.Size()
-}
-
-func readFileHead(t *testing.T, path string, n int) string {
-	t.Helper()
-	data, _ := os.ReadFile(path)
-	lines := strings.SplitN(string(data), "\n", n+1)
-	if len(lines) > n {
-		lines = lines[:n]
-	}
-	return strings.Join(lines, "\n")
 }
 
 func truncate(s string, n int) string {

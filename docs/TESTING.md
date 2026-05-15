@@ -194,7 +194,7 @@ E2E tests build all binaries and run the full encrypt → relay → decrypt flow
 
 | Test | What it validates |
 |---|---|
-| `TestE2EConfigMode` | Full encrypt → relay → decrypt flow with real binaries (config mode) |
+| `TestE2ESyncHappyPath` | Full sync encrypt → relay-server → decrypt flow with real binaries |
 | `TestE2ESSEStream` | Same with SSE streaming enabled |
 
 ### TLS (`e2e_tls_test.go`)
