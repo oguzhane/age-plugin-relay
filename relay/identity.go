@@ -20,7 +20,7 @@ type RelayIdentity struct {
 // NewRelayIdentity creates a RelayIdentity from the raw Bech32 data payload
 // of an AGE-PLUGIN-RELAY-1... identity string.
 //
-// The payload after the 4-byte tag is either:
+// The payload after the 16-byte tag is either:
 //   - A full URL (starts with "http://" or "https://") — legacy mode
 //   - A remote name — looked up in relay-config.yaml
 func NewRelayIdentity(data []byte) (*RelayIdentity, error) {

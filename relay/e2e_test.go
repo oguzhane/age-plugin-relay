@@ -334,7 +334,7 @@ func decryptMessageExpectFailure(t *testing.T, ageBin, pluginBin, identityStr, c
 	return string(out)
 }
 
-// computeTagB64 computes the base64 tag for a recipient (first 4 bytes of SHA256).
+// computeTagB64 computes the base64 tag for a recipient (first 16 bytes of SHA256).
 func computeTagB64(innerRecipient string) string {
 	tag := ComputeTag(innerRecipient)
 	return base64.RawStdEncoding.EncodeToString(tag[:])

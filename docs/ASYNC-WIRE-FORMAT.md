@@ -18,7 +18,7 @@ Three actors: **Plugin**, **Broker**, **Operator**.
   "action": "unwrap",
   "stream": false,
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-  "tag": "QPg24g",
+  "tag": "QPg24ggKk7xKd2t3c5rL9A",
   "expires_at": 1715350800,
   "intent_claim_pub": "<base64: Ed25519 public key>",
   "encrypted_payload": "<base64: age-encrypted InnerRequestPayload>"
@@ -57,7 +57,7 @@ Three actors: **Plugin**, **Broker**, **Operator**.
 
 `outer_hash` covers every envelope field outside `encrypted_payload` (the [Complete Outer Field Binding](ARCHITECTURE.md#35-outer-hash-construction) principle):
 
-`outer_hash` = `SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800.<intent_claim_pub>")`
+`outer_hash` = `SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.<intent_claim_pub>")`
 
 ### Response — 202 Accepted
 
@@ -99,7 +99,7 @@ Three actors: **Plugin**, **Broker**, **Operator**.
 {
   "version": 1,
   "action": "pull",
-  "tag": "QPg24g"
+  "tag": "QPg24ggKk7xKd2t3c5rL9A"
 }
 ```
 
@@ -120,7 +120,7 @@ Three actors: **Plugin**, **Broker**, **Operator**.
         "version": 1,
         "action": "unwrap",
         "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-        "tag": "QPg24g",
+        "tag": "QPg24ggKk7xKd2t3c5rL9A",
         "expires_at": 1715350800,
         "encrypted_payload": "<base64: age-encrypted InnerRequestPayload>"
       }
@@ -522,6 +522,6 @@ type RelayStanza struct {
 
 | Direction | Formula | Example |
 |---|---|---|
-| Request (plugin → server/operator) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800.AAAA...")` |
+| Request (plugin → server/operator) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.AAAA...")` |
 | Fulfill response (server/operator → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
 | Reject response (server/operator → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.reject.a3f1...7b8c")` |

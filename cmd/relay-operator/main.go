@@ -10,7 +10,7 @@
 //	relay-operator \
 //	  --broker https://broker.example:8443 \
 //	  --identity keys.txt \
-//	  --tag QPg24g \
+//	  --tag QPg24ggKk7xKd2t3c5rL9A \
 //	  [--loop] \
 //	  [--auth-token broker-bearer-token] \
 //	  [--pull-interval 5s]

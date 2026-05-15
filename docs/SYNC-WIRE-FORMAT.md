@@ -16,7 +16,7 @@ All interactions use `POST` with `Content-Type: application/json` (request) and 
   "action": "unwrap",
   "stream": false,
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-  "tag": "QPg24g",
+  "tag": "QPg24ggKk7xKd2t3c5rL9A",
   "expires_at": 1715350800,
   "intent_claim_pub": "<base64: Ed25519 public key>",
   "encrypted_payload": "<base64: age-encrypted InnerRequestPayload>"
@@ -87,7 +87,7 @@ SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_clai
 Example:
 
 ```
-SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800.AAAA...")
+SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.AAAA...")
 ```
 
 > **Sync flow note:** In the sync flow, the relay-server handles both decrypt and respond in a single process. There is no third-party fulfill step, so `intent_claim_sig` verification is not needed. The `intent_claim_pub` is included in the outer hash for consistency with the async wire format, and `intent_claim_secret` is present in the inner payload for the same reason. See [Intent Claim](INTENT-CLAIM.md) for the full design.
@@ -449,6 +449,6 @@ type InnerResponsePayload struct {
 
 | Direction | Formula | Example |
 |---|---|---|
-| Request (plugin → server) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24g.1715350800.AAAA...")` |
+| Request (plugin → server) | `SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_claim_pub}")` | `SHA-256("1.unwrap.0.a3f1...7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.AAAA...")` |
 | Fulfill response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.fulfill.a3f1...7b8c")` |
 | Reject response (server → plugin) | `SHA-256("{version}.{action}.{intent_id}")` | `SHA-256("1.reject.a3f1...7b8c")` |

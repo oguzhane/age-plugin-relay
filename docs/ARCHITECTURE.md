@@ -70,13 +70,13 @@ At decrypt time, the plugin looks up the target in `relay-config.yaml` to get th
 Example with an X25519 inner recipient:
 
 ```
--> relay QPg24g X25519 CKTwCgeHBEBFmdC7GJSffbto8y+8G8iPHhTeMnhxIg4
+-> relay QPg24ggKk7xKd2t3c5rL9A X25519 CKTwCgeHBEBFmdC7GJSffbto8y+8G8iPHhTeMnhxIg4
 X0e7a90Lzp8lnpGBH7JdWnpW+WcH61T4obAXzVHa6N8
 ```
 
 | Argument | Description |
 |---|---|
-| `QPg24g...` | Base64-encoded 16-byte tag (for routing) |
+| `QPg24ggKk7xKd2t3c5rL9A...` | Base64-encoded 16-byte tag (for routing) |
 | `X25519` | Original inner stanza type |
 | `CKTw...` | Original inner stanza arguments (passed through) |
 
@@ -225,7 +225,7 @@ SHA-256("{version}.{action}.{stream}.{intent_id}.{tag}.{expires_at}.{intent_clai
 Example:
 
 ```
-SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24g.1715350800.AAAA...")
+SHA-256("1.unwrap.0.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.AAAA...")
 ```
 
 Dot separator. No JSON. No whitespace. `expires_at` as decimal string. `intent_claim_pub` as base64 raw standard (empty string if not set). Deterministic on both sides.
@@ -290,7 +290,7 @@ Authorization: Bearer <auth_token>
   "version": 1,
   "action": "unwrap",
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-  "tag": "QPg24g",
+  "tag": "QPg24ggKk7xKd2t3c5rL9A",
   "expires_at": 1715350800,
   "stream": true,
   "intent_claim_pub": "<base64: Ed25519 public key>",
@@ -438,7 +438,7 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
   "version": 1,
   "action": "unwrap",
   "intent_id": "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c",
-  "tag": "QPg24g",
+  "tag": "QPg24ggKk7xKd2t3c5rL9A",
   "expires_at": 1715350800,
   "intent_claim_pub": "<base64: Ed25519 public key>",
   "encrypted_payload": "<base64: age-encrypted blob>"
@@ -459,7 +459,7 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
 {
   "version": 1,
   "action": "pull",
-  "tag": "QPg24g"
+  "tag": "QPg24ggKk7xKd2t3c5rL9A"
 }
 ```
 
@@ -474,7 +474,7 @@ The plugin does not need to know whether the endpoint is a `relay-server` or a `
         "version": 1,
         "action": "unwrap",
         "intent_id": "a3f1...",
-        "tag": "QPg24g",
+        "tag": "QPg24ggKk7xKd2t3c5rL9A",
         "expires_at": 1715350800,
         "encrypted_payload": "<age-encrypted blob>"
       }
@@ -960,7 +960,7 @@ The operator polls the broker, decrypts encrypted payloads, unwraps stanzas, and
 relay-operator \
   --broker https://broker.example:8443 \
   --identity keys.txt \
-  --tag QPg24g \
+  --tag QPg24ggKk7xKd2t3c5rL9A \
   --auth-token broker-bearer-token \
   --pull-interval 5s
 ```

@@ -660,7 +660,7 @@ cmd_help() {
     echo -e "  ${DIM}# Async flow: broker + operator${NC}"
     echo "  relayctl broker start --port 8443"
     echo "  relayctl operator start --broker http://localhost:8443 \\"
-    echo "    --identity keys.txt --tag QPg24g"
+    echo "    --identity keys.txt --tag QPg24ggKk7xKd2t3c5rL9A"
     echo "  echo 'hello' | relayctl encrypt -r age1relay1... -o secret.age"
     echo "  relayctl decrypt -i relay-id.txt -f secret.age --config relay-config.yaml"
     echo "  relayctl stop"

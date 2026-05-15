@@ -23,14 +23,14 @@ func testIdentity(t *testing.T) (*age.X25519Identity, string) {
 }
 
 func TestOuterHashRequestDeterminism(t *testing.T) {
-	h1 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24g", 1715350800, "")
-	h2 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24g", 1715350800, "")
+	h1 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", 1715350800, "")
+	h2 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", 1715350800, "")
 	if h1 != h2 {
 		t.Fatalf("expected deterministic hash, got %q != %q", h1, h2)
 	}
 
-	// Known-answer: SHA-256("1.unwrap.0.abc123.QPg24g.1715350800.")
-	canonical := "1.unwrap.0.abc123.QPg24g.1715350800."
+	// Known-answer: SHA-256("1.unwrap.0.abc123.QPg24ggKk7xKd2t3c5rL9A.1715350800.")
+	canonical := "1.unwrap.0.abc123.QPg24ggKk7xKd2t3c5rL9A.1715350800."
 	expected := sha256.Sum256([]byte(canonical))
 	expectedHex := hex.EncodeToString(expected[:])
 	if h1 != expectedHex {
@@ -39,18 +39,18 @@ func TestOuterHashRequestDeterminism(t *testing.T) {
 }
 
 func TestOuterHashRequestDifferentFields(t *testing.T) {
-	h1 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24g", 1715350800, "")
-	h2 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24g", 1715350801, "") // different expires_at
+	h1 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", 1715350800, "")
+	h2 := relay.OuterHashRequest(1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", 1715350801, "") // different expires_at
 	if h1 == h2 {
 		t.Fatal("different expires_at should produce different hashes")
 	}
 
-	h3 := relay.OuterHashRequest(1, "unwrap", false, "different_id", "QPg24g", 1715350800, "")
+	h3 := relay.OuterHashRequest(1, "unwrap", false, "different_id", "QPg24ggKk7xKd2t3c5rL9A", 1715350800, "")
 	if h1 == h3 {
 		t.Fatal("different intent_id should produce different hashes")
 	}
 
-	h4 := relay.OuterHashRequest(1, "unwrap", true, "abc123", "QPg24g", 1715350800, "") // different stream
+	h4 := relay.OuterHashRequest(1, "unwrap", true, "abc123", "QPg24ggKk7xKd2t3c5rL9A", 1715350800, "") // different stream
 	if h1 == h4 {
 		t.Fatal("different stream should produce different hashes")
 	}
@@ -274,7 +274,7 @@ func TestEncryptDecryptFullFlow(t *testing.T) {
 	id, recipientStr := testIdentity(t)
 	expiresAt := time.Now().Add(5 * time.Minute).Unix()
 	intentID := "a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c"
-	tag := "QPg24g"
+	tag := "QPg24ggKk7xKd2t3c5rL9A"
 	stanzas := []relay.RelayStanza{{Type: "X25519", Args: []string{"ephkey1"}, Body: "c3RhbnphYm9keQ"}}
 
 	inner, err := relay.BuildRequestPayload(1, "unwrap", false, intentID, tag, expiresAt, stanzas, "ZXBoZW1lcmFsa2V5", "")
@@ -371,12 +371,12 @@ func TestOuterHashTamperDetectionIntentID(t *testing.T) {
 	id, recipientStr := testIdentity(t)
 
 	expiresAt := time.Now().Add(10 * time.Minute).Unix()
-	inner, _ := relay.BuildRequestPayload(1, "unwrap", false, "abc123", "QPg24g", expiresAt,
+	inner, _ := relay.BuildRequestPayload(1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", expiresAt,
 		[]relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Ym9keQ"}}, "ZXBoZW1lcmFs", "")
 	encrypted, _ := relay.EncryptPayload(*inner, recipientStr)
 
 	decrypted, _ := relay.DecryptPayload(encrypted, []age.Identity{id})
-	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", false, "TAMPERED", "QPg24g", expiresAt, "")
+	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", false, "TAMPERED", "QPg24ggKk7xKd2t3c5rL9A", expiresAt, "")
 	if err == nil {
 		t.Fatal("expected outer_hash mismatch for tampered intent_id")
 	}
@@ -386,12 +386,12 @@ func TestExpiresAtEnforcement(t *testing.T) {
 	id, recipientStr := testIdentity(t)
 
 	expiresAt := time.Now().Add(-1 * time.Minute).Unix() // already expired
-	inner, _ := relay.BuildRequestPayload(1, "unwrap", false, "abc123", "QPg24g", expiresAt,
+	inner, _ := relay.BuildRequestPayload(1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", expiresAt,
 		[]relay.RelayStanza{{Type: "X25519", Args: []string{"a"}, Body: "Ym9keQ"}}, "ZXBoZW1lcmFs", "")
 	encrypted, _ := relay.EncryptPayload(*inner, recipientStr)
 
 	decrypted, _ := relay.DecryptPayload(encrypted, []age.Identity{id})
-	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", false, "abc123", "QPg24g", expiresAt, "")
+	err := relay.VerifyRequestPayload(decrypted, 1, "unwrap", false, "abc123", "QPg24ggKk7xKd2t3c5rL9A", expiresAt, "")
 	if err == nil {
 		t.Fatal("expected expiry error")
 	}
