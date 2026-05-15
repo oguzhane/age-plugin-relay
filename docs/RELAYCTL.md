@@ -60,7 +60,7 @@ Compute the routing tag for a recipient. The tag is used by the operator to filt
 relayctl tag --recipient <age1...>
 ```
 
-The tag is `base64(SHA256(recipient)[:4])` — the same value the plugin embeds in relay stanzas.
+The tag is `base64(SHA256(recipient)[:16])` — the same value the plugin embeds in relay stanzas.
 
 ---
 

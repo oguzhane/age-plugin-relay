@@ -106,7 +106,7 @@ func PostToRelay(remote RemoteConfig, stanzas []*age.Stanza, innerRecipient stri
 	// Compute outer fields.
 	expiresAt := time.Now().Add(remote.TimeoutDuration()).Unix()
 	tagBytes := ComputeTag(innerRecipient)
-	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:])
 
 	// Build inner stanzas.
 	relayStanzas := make([]RelayStanza, len(stanzas))

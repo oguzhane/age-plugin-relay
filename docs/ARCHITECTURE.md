@@ -76,7 +76,7 @@ X0e7a90Lzp8lnpGBH7JdWnpW+WcH61T4obAXzVHa6N8
 
 | Argument | Description |
 |---|---|
-| `QPg24g` | Base64-encoded 4-byte tag (for routing) |
+| `QPg24g...` | Base64-encoded 16-byte tag (for routing) |
 | `X25519` | Original inner stanza type |
 | `CKTw...` | Original inner stanza arguments (passed through) |
 
@@ -301,7 +301,7 @@ Authorization: Bearer <auth_token>
 - `version`: Protocol version (currently `1`).
 - `action`: `"unwrap"`.
 - `intent_id`: Plugin-generated unique ID (16 random bytes, hex-encoded, 32 chars).
-- `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:4]`, base64).
+- `tag`: Routing tag derived from the inner recipient (`SHA-256(recipient)[:16]`, base64).
 - `expires_at`: Unix timestamp (seconds) — intent expiry.
 - `stream`: Optional. If `true`, the client accepts SSE responses.
 - `intent_claim_pub`: Ed25519 public key (base64 raw standard). Per-intent authorization. See [Intent Claim](INTENT-CLAIM.md).

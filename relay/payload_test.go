@@ -353,7 +353,7 @@ func TestOuterHashTamperDetectionTag(t *testing.T) {
 	id, recipientStr := testIdentity(t)
 
 	tagBytes := relay.ComputeTag(recipientStr)
-	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:])
 	expiresAt := time.Now().Add(10 * time.Minute).Unix()
 
 	inner, _ := relay.BuildRequestPayload(1, "unwrap", false, "abc123", tag, expiresAt,

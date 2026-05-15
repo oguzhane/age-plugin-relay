@@ -129,7 +129,7 @@ func TestAsyncEndToEnd(t *testing.T) {
 	defer brokerServer.Close()
 
 	tagBytes := relay.ComputeTag(recipientStr)
-	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	tag := base64.RawStdEncoding.EncodeToString(tagBytes[:])
 
 	fileKey := make([]byte, 16)
 	copy(fileKey, "test-file-key!!!")
@@ -571,7 +571,7 @@ func TestAsyncPluginPollingLoop(t *testing.T) {
 
 	// Pull all pending intents using the same tag computation as PostToRelay.
 	tagBytes := relay.ComputeTag(recipientStr)
-	tagStr := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	tagStr := base64.RawStdEncoding.EncodeToString(tagBytes[:])
 	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tagStr}
 	pullBody, _ := json.Marshal(pullReq)
 	pullHTTP, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pullBody))
@@ -693,7 +693,7 @@ func TestAsyncPluginPollingLoopRejected(t *testing.T) {
 
 	// Find the intent by pulling with the computed tag.
 	tagBytes := relay.ComputeTag(recipientStr)
-	tagStr := base64.RawStdEncoding.EncodeToString(tagBytes[:4])
+	tagStr := base64.RawStdEncoding.EncodeToString(tagBytes[:])
 	pullReq := relay.RelayRequest{Version: 1, Action: "pull", Tag: tagStr}
 	pb, _ := json.Marshal(pullReq)
 	ph, _ := http.NewRequest("POST", brokerServer.URL, bytes.NewReader(pb))

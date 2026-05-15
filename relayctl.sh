@@ -329,11 +329,11 @@ cmd_tag() {
 
     [ -n "$recipient" ] || die "Missing --recipient <age1...>"
 
-    # Compute tag the same way Go does: SHA256(recipient)[:4] → base64 raw std encoding.
+    # Compute tag the same way Go does: SHA256(recipient)[:16] → base64 raw std encoding.
     local hash tag
     hash=$(printf '%s' "$recipient" | shasum -a 256 | cut -d' ' -f1)
-    # Take first 8 hex chars (4 bytes), decode to binary, base64 encode, strip padding
-    tag=$(echo "$hash" | head -c 8 | xxd -r -p | base64 | tr -d '=')
+    # Take first 32 hex chars (16 bytes), decode to binary, base64 encode, strip padding
+    tag=$(echo "$hash" | head -c 32 | xxd -r -p | base64 | tr -d '=')
 
     header "Routing tag"
     echo "  Recipient: ${recipient}"
