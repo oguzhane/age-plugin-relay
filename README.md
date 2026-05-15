@@ -1,6 +1,6 @@
 # age-plugin-relay
 
-**Decrypt age data from anywhere.**
+**Decrypt age-encrypted files from anywhere.**
 
 An [age](https://age-encryption.org) plugin that relays decryption requests to a remote server over HTTP. The private key never leaves the remote machine. All payloads are encrypted end-to-end — the relay infrastructure sees only opaque ciphertext and routing metadata.
 
