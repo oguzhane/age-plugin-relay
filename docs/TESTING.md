@@ -224,3 +224,10 @@ E2E tests build all binaries and run the full encrypt → relay → decrypt flow
 | `TestE2ESyncServerDown` | Plugin returns error when relay server is unreachable |
 | `TestE2ESyncWrongKey` | Sync relay rejects when identity doesn't match the stanzas |
 | `TestE2EAsyncBrokerDown` | Plugin returns error when broker is unreachable |
+
+### Plugin-agnostic flow (`e2e_plugin_test.go`)
+
+| Test | What it validates |
+|---|---|
+| `TestE2EPluginAgnosticSync` | Full sync flow with a non-X25519 plugin recipient (`age-plugin-stub`), proving plugin-agnostic dispatch |
+| `TestE2EPluginAgnosticAsync` | Full async flow with a non-X25519 plugin recipient (`age-plugin-stub`), end-to-end through broker and operator |
