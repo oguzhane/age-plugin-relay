@@ -29,7 +29,7 @@ type RemoteConfig struct {
 	TLSCA             string `yaml:"tls_ca,omitempty"`             // optional: CA cert for server verification
 	Timeout           string `yaml:"timeout,omitempty"`            // optional: Go duration (default: 5m)
 	AuthToken        string `yaml:"auth_token,omitempty"`        // optional: Bearer token for relay server auth
-	UnwrapRecipient  string `yaml:"unwrap_recipient,omitempty"`  // required: age recipient of the unwrapper (e.g. age1abc...)
+	UnwrapRecipient  string `yaml:"unwrap_recipient,omitempty"`  // required: any age recipient of the unwrapper (native X25519, PQ, or plugin e.g. age1yubikey1q...)
 	PollInterval     string `yaml:"poll_interval,omitempty"`     // optional: async polling interval (default: min(timeout/60, 5s))
 }
 

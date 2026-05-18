@@ -268,7 +268,7 @@ func loadIdentities(path string) ([]age.Identity, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return age.ParseIdentities(f)
+	return relay.ParseAnyIdentities(f)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

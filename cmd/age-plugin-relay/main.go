@@ -74,12 +74,8 @@ func generate(innerRecipient, remoteName string) error {
 		return err
 	}
 
-	recipients, err := age.ParseRecipients(strings.NewReader(innerRecipient))
-	if err != nil {
+	if _, err := relay.ParseRecipientString(innerRecipient); err != nil {
 		return fmt.Errorf("invalid inner recipient: %w", err)
-	}
-	if len(recipients) == 0 {
-		return fmt.Errorf("no recipients parsed from %q", innerRecipient)
 	}
 
 	warnIfPluginMissing(innerRecipient)

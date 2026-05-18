@@ -81,7 +81,7 @@ func SealResponse(inner InnerResponsePayload, recipientStr string) (string, erro
 
 // OpenResponse decrypts a sealed InnerResponsePayload using the plugin's
 // ephemeral age identity. Called by the plugin.
-func OpenResponse(sealed string, identity *age.X25519Identity) (*InnerResponsePayload, error) {
+func OpenResponse(sealed string, identity age.Identity) (*InnerResponsePayload, error) {
 	raw, err := base64.RawStdEncoding.DecodeString(sealed)
 	if err != nil {
 		return nil, fmt.Errorf("decoding sealed response: %w", err)

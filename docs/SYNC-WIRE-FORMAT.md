@@ -68,7 +68,7 @@ Each stanza:
 
 | Field | Type | Description |
 |---|---|---|
-| `type` | string | Stanza type (e.g., `"X25519"`) |
+| `type` | string | Stanza type (e.g., `"X25519"`, `"piv-p256"` for YubiKey, or any plugin stanza type) |
 | `args` | string[] | Stanza arguments |
 | `body` | string | Stanza body, base64 raw standard encoded |
 

@@ -18,7 +18,7 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
   age.ParseRecipients() -> Wrap()               Match stanzas by tag, reconstruct inner stanzas
     |                                             |
     v                                             v
-  Re-tag stanza: X25519 -> relay                Resolve remote name (from config)
+  Re-tag stanza: <inner_type> -> relay                Resolve remote name (from config)
     |                                             |
     v                                             v
   Done. No network. Identity-agnostic.          Build encrypted payload → HTTP POST → decrypt response
@@ -67,7 +67,7 @@ At decrypt time, the plugin looks up the remote name in `relay-config.yaml` to g
 <body>
 ```
 
-Example with an X25519 inner recipient:
+Example with an X25519 inner recipient (any age recipient type works — YubiKey, hybrid PQ, or any plugin):
 
 ```
 -> relay QPg24ggKk7xKd2t3c5rL9A X25519 CKTwCgeHBEBFmdC7GJSffbto8y+8G8iPHhTeMnhxIg4
@@ -142,6 +142,8 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
   "intent_claim_secret": "<Ed25519 private key seed, base64 raw std>"
 }
 ```
+
+Note: The stanza `type` reflects the original inner recipient type. Examples: `X25519` (native), `piv-p256` (YubiKey), or any other plugin stanza type.
 
 | Field | Description |
 |---|---|
@@ -305,7 +307,7 @@ Authorization: Bearer <auth_token>
 
 **Plugin build steps:**
 
-1. Generate ephemeral age X25519 identity (keypair).
+1. Generate ephemeral age X25519 identity (keypair). *(Ephemeral keys are always X25519 in age, regardless of the inner recipient type.)*
 2. Generate Ed25519 intent claim keypair.
 3. Build inner request payload: `{nonce, outer_hash, stanzas, ephemeral_key, intent_claim_secret}`.
 4. `age.Encrypt(inner, unwrap_recipient)` → `encrypted_payload`.
