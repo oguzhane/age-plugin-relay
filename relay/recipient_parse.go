@@ -53,6 +53,12 @@ func ParseAnyIdentities(r io.Reader) ([]age.Identity, error) {
 			continue
 		}
 
+		// Skip non-identity lines (e.g., "Recipient: age1..." from age-plugin-yubikey).
+		// All age identity strings start with "AGE-".
+		if !strings.HasPrefix(line, "AGE-") {
+			continue
+		}
+
 		// Try native identity parsing (AGE-SECRET-KEY-1... or AGE-SECRET-KEY-PQ-1...).
 		nativeIDs, err := age.ParseIdentities(strings.NewReader(line))
 		if err == nil && len(nativeIDs) > 0 {
