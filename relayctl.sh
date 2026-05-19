@@ -8,6 +8,8 @@ set -euo pipefail
 #
 # Key Management:
 #   keygen                              Generate a new X25519 key pair
+#   keygen --yubikey [--slot N] ...     Generate a YubiKey identity
+#   keygen --list                       List all connected YubiKey recipients
 #   generate --recipient <age1...> --remote <name>
 #                                       Generate relay recipient + identity
 #   tag --recipient <age1...>           Compute routing tag for a recipient
@@ -37,6 +39,7 @@ WORKSPACE="${RELAYCTL_WORKSPACE:-${SCRIPT_DIR}/workspace}"
 
 AGE="${SCRIPT_DIR}/tools/bin/age"
 AGE_KEYGEN="${SCRIPT_DIR}/tools/bin/age-keygen"
+YUBIKEY_PLUGIN="${SCRIPT_DIR}/tools/bin/age-plugin-yubikey"
 BIN_DIR="${SCRIPT_DIR}/bin"
 PLUGIN_BIN="${BIN_DIR}/age-plugin-relay"
 SERVER_BIN="${BIN_DIR}/relay-server"
@@ -46,6 +49,7 @@ OPERATOR_BIN="${BIN_DIR}/relay-operator"
 # Fall back to PATH if tools/bin/ doesn't exist
 [ -x "$AGE" ] || AGE="$(command -v age 2>/dev/null || true)"
 [ -x "$AGE_KEYGEN" ] || AGE_KEYGEN="$(command -v age-keygen 2>/dev/null || true)"
+[ -x "$YUBIKEY_PLUGIN" ] || YUBIKEY_PLUGIN="$(command -v age-plugin-yubikey 2>/dev/null || true)"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -108,6 +112,11 @@ ensure_operator() {
         mkdir -p "$BIN_DIR"
         go build -o "$OPERATOR_BIN" "${SCRIPT_DIR}/cmd/relay-operator/" || die "Build failed"
     fi
+}
+
+ensure_yubikey_plugin() {
+    [ -n "$YUBIKEY_PLUGIN" ] && [ -x "$YUBIKEY_PLUGIN" ] || \
+        die "age-plugin-yubikey not found. Place it in tools/bin/ or install: brew install age-plugin-yubikey"
 }
 
 # ── PID Management ───────────────────────────────────────────────────────────
@@ -240,6 +249,62 @@ daemon_logs() {
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 cmd_keygen() {
+    local yubikey=false list_keys=false
+    local yk_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yubikey)       yubikey=true; shift ;;
+            --list)          list_keys=true; shift ;;
+            --slot)          yk_args+=("--slot" "$2"); shift 2 ;;
+            --serial)        yk_args+=("--serial" "$2"); shift 2 ;;
+            --name)          yk_args+=("--name" "$2"); shift 2 ;;
+            --pin-policy)    yk_args+=("--pin-policy" "$2"); shift 2 ;;
+            --touch-policy)  yk_args+=("--touch-policy" "$2"); shift 2 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    # List all connected YubiKey recipients.
+    if [ "$list_keys" = true ]; then
+        ensure_yubikey_plugin
+        header "YubiKey recipients"
+        "$YUBIKEY_PLUGIN" --list
+        return
+    fi
+
+    # YubiKey key generation.
+    if [ "$yubikey" = true ]; then
+        ensure_yubikey_plugin
+        ensure_workspace
+
+        local output="${WORKSPACE}/identity.txt"
+        local i=1
+        while [ -f "$output" ]; do
+            output="${WORKSPACE}/identity-${i}.txt"
+            ((i++))
+        done
+
+        header "Generating YubiKey identity"
+        runcmd "$YUBIKEY_PLUGIN" --generate "${yk_args[@]+"${yk_args[@]}"}"
+        "$YUBIKEY_PLUGIN" --generate "${yk_args[@]+"${yk_args[@]}"}" > "$output" || die "YubiKey key generation failed"
+
+        # Extract the recipient line (age1yubikey1q...).
+        local pubkey
+        pubkey=$(grep "^#.*recipient:" "$output" | awk '{print $NF}' || true)
+        if [ -z "$pubkey" ]; then
+            pubkey=$(grep "^age1yubikey1" "$output" || true)
+        fi
+
+        header "YubiKey identity generated"
+        echo "  Recipient: ${pubkey:-<see identity file>}"
+        echo "  Identity:  ${output}"
+        echo ""
+        info "Use this recipient with: relayctl generate --recipient ${pubkey:-age1yubikey1...} ..."
+        return
+    fi
+
+    # Native X25519 key generation (default).
     ensure_age
     ensure_workspace
 
@@ -377,7 +442,7 @@ cmd_server() {
             info "Port:     ${port}"
 
             # Add plugin to PATH so relay-server can discover it
-            export PATH="${BIN_DIR}:${PATH}"
+            export PATH="${BIN_DIR}:${SCRIPT_DIR}/tools/bin:${PATH}"
 
             start_daemon "relay-server" "$SERVER_BIN" \
                 -identity "$identity" \
@@ -467,6 +532,9 @@ cmd_operator() {
             info "Identity: ${identity}"
             info "Tag:      ${tag}"
 
+            # Add plugin binaries to PATH so operator can discover age plugins
+            export PATH="${BIN_DIR}:${SCRIPT_DIR}/tools/bin:${PATH}"
+
             start_daemon "relay-operator" "$OPERATOR_BIN" \
                 --broker "$broker_url" \
                 --identity "$identity" \
@@ -500,6 +568,9 @@ cmd_operator() {
             info "Broker:   ${broker_url}"
             info "Identity: ${identity}"
             info "Tag:      ${tag}"
+
+            # Add plugin binaries to PATH so operator can discover age plugins
+            export PATH="${BIN_DIR}:${SCRIPT_DIR}/tools/bin:${PATH}"
 
             runcmd "$OPERATOR_BIN" \
                 --broker "$broker_url" \
@@ -541,7 +612,7 @@ cmd_encrypt() {
 
     [ -n "$recipient" ] || die "Missing -r <recipient>"
 
-    export PATH="${BIN_DIR}:${PATH}"
+    export PATH="${BIN_DIR}:${SCRIPT_DIR}/tools/bin:${PATH}"
 
     local age_args=("-r" "$recipient")
     [ -n "$outfile" ] && age_args+=("-o" "$outfile")
@@ -577,10 +648,10 @@ cmd_decrypt() {
     [ -n "$identity_file" ] || die "Missing -i <identity-file>"
     [ -f "$identity_file" ] || die "Identity file not found: ${identity_file}"
 
-    export PATH="${BIN_DIR}:${PATH}"
+    export PATH="${BIN_DIR}:${SCRIPT_DIR}/tools/bin:${PATH}"
     # Auto-discover config: explicit flag > env var > workspace default
     if [ -n "$config" ]; then
-        export AGE_PLUGIN_RELAY_CONFIG="$config"
+        export AGE_PLUGIN_RELAY_CONFIG="$(cd "$(dirname "$config")" && pwd)/$(basename "$config")"
     elif [ -z "${AGE_PLUGIN_RELAY_CONFIG:-}" ] && [ -f "${WORKSPACE}/relay-config.yaml" ]; then
         export AGE_PLUGIN_RELAY_CONFIG="${WORKSPACE}/relay-config.yaml"
     fi
@@ -644,6 +715,8 @@ cmd_help() {
     echo ""
     echo -e "${BOLD}Key Management:${NC}"
     echo "  keygen                                Generate a new X25519 key pair"
+    echo "  keygen --yubikey [--slot N] [...]      Generate a YubiKey identity"
+    echo "  keygen --list                          List all connected YubiKey recipients"
     echo "  generate --recipient <age1...> --remote <name> [--config <file>]"
     echo "                                        Generate relay recipient + identity"
     echo "  tag --recipient <age1...>             Compute routing tag for a recipient"

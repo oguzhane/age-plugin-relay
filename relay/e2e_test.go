@@ -76,6 +76,7 @@ type e2eBinaries struct {
 	Age           string
 	AgeKeygen     string
 	Plugin        string
+	StubPlugin    string
 	RelayServer   string
 	RelayBroker   string
 	RelayOperator string
@@ -102,12 +103,14 @@ func buildAllBinaries(t *testing.T) e2eBinaries {
 		Age:           ageBin,
 		AgeKeygen:     ageKeygenBin,
 		Plugin:        filepath.Join(binDir, "age-plugin-relay"),
+		StubPlugin:    filepath.Join(binDir, "age-plugin-stub"),
 		RelayServer:   filepath.Join(binDir, "relay-server"),
 		RelayBroker:   filepath.Join(binDir, "relay-broker"),
 		RelayOperator: filepath.Join(binDir, "relay-operator"),
 	}
 
 	gobuild(t, moduleRoot, "./cmd/age-plugin-relay/", bins.Plugin)
+	gobuild(t, moduleRoot, "./cmd/age-plugin-stub/", bins.StubPlugin)
 	gobuild(t, moduleRoot, "./cmd/relay-server/", bins.RelayServer)
 	gobuild(t, moduleRoot, "./cmd/relay-broker/", bins.RelayBroker)
 	gobuild(t, moduleRoot, "./cmd/relay-operator/", bins.RelayOperator)

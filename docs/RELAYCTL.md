@@ -12,11 +12,28 @@ Operational CLI tool for `age-plugin-relay`. Manages keys, services, and encrypt
 
 ### `keygen`
 
-Generate a new X25519 key pair and save it to the workspace.
+Generate a new key pair and save it to the workspace.
 
 ```bash
+# Native X25519 (default)
 ./relayctl.sh keygen
+
+# YubiKey identity
+./relayctl.sh keygen --yubikey [--slot SLOT] [--serial SERIAL] [--name NAME] [--pin-policy PIN-POLICY] [--touch-policy TOUCH-POLICY]
+
+# List all connected YubiKey recipients
+./relayctl.sh keygen --list
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--yubikey` | Generate a YubiKey identity instead of X25519 (looks in `tools/bin/` first, then PATH) |
+| `--list` | List all age-compatible recipients on connected YubiKeys |
+| `--slot` | YubiKey slot number (YubiKey mode only) |
+| `--serial` | YubiKey serial number (YubiKey mode only) |
+| `--name` | Key name (YubiKey mode only) |
+| `--pin-policy` | PIN policy: `never`, `once`, `always` (YubiKey mode only) |
+| `--touch-policy` | Touch policy: `never`, `cached`, `always` (YubiKey mode only) |
 
 Output:
 - `workspace/identity.txt` (or `identity-N.txt` if the file already exists)
@@ -35,7 +52,7 @@ Generate a relay recipient (for encryption) and relay identity (for decryption) 
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--recipient`, `-r` | Yes | Inner age recipient (e.g., `age1...`) |
+| `--recipient`, `-r` | Yes | Inner age recipient — native (`age1...`) or plugin (`age1yubikey1q...`, etc.) |
 | `--remote` | Yes | Remote name from `relay-config.yaml` |
 | `--config` | No | Path to `relay-config.yaml` |
 
@@ -215,13 +232,15 @@ Build all Go binaries (plugin, server, broker, operator). Binaries that are miss
 | `RELAYCTL_WORKSPACE` | Workspace directory (default: `./workspace`) |
 | `AGE_PLUGIN_RELAY_CONFIG` | Path to `relay-config.yaml` (overrides auto-discovery) |
 
+All commands add `bin/` and `tools/bin/` to PATH so that relay binaries and external plugins (e.g., `age-plugin-yubikey`) are discoverable.
+
 ---
 
 ## Workspace Layout
 
 ```
 workspace/
-├── identity.txt              # X25519 key pair (from keygen)
+├── identity.txt              # Key pair — X25519 (from keygen) or YubiKey (from keygen --yubikey)
 ├── relay-recipient.txt       # Relay recipient (from generate)
 ├── relay-identity.txt        # Relay identity (from generate)
 ├── relay-config.yaml         # User-created config file
@@ -347,4 +366,102 @@ echo "hello async relay" | ./relayctl.sh encrypt -r age1relay1... -o workspace/s
 ./relayctl.sh server start --identity keys.txt \
   --tls-cert server.crt --tls-key server.key --tls-ca ca.crt
 # Config must include: tls_cert, tls_key, tls_ca
+```
+
+### YubiKey Walkthrough (Sync)
+
+Encrypt and decrypt using a YubiKey identity through a relay-server. Requires `age-plugin-yubikey` installed (in `tools/bin/` or PATH).
+
+```bash
+# 1. Build all binaries
+./relayctl.sh build
+
+# 2. List connected YubiKey recipients (optional — check what's available)
+./relayctl.sh keygen --list
+
+# 3. Generate a YubiKey identity (creates key on the YubiKey)
+./relayctl.sh keygen --yubikey --slot 1 --touch-policy cached
+# => Recipient: age1yubikey1q...
+# => Identity:  workspace/identity.txt
+
+# 4. Create relay-config.yaml pointing to the relay server
+cat > relay-config.yaml <<EOF
+remotes:
+  my-yubikey:
+    url: http://127.0.0.1:19876
+    unwrap_recipient: age1yubikey1q...
+EOF
+
+# 5. Generate relay recipient + identity
+./relayctl.sh generate --recipient age1yubikey1q... --remote my-yubikey
+
+# 6. Start the relay server (needs age-plugin-yubikey in PATH for unwrap)
+./relayctl.sh server start --identity workspace/identity.txt
+
+# 7. Encrypt (no server needed, no YubiKey needed)
+echo "hello yubikey relay" | ./relayctl.sh encrypt -r age1relay1... -o workspace/secret.age
+
+# 8. Decrypt (contacts relay server → server unwraps via YubiKey → may require touch)
+./relayctl.sh decrypt -i workspace/relay-identity.txt -f workspace/secret.age --config relay-config.yaml
+# => hello yubikey relay
+
+# 9. Clean up
+./relayctl.sh stop && ./relayctl.sh clean
+```
+
+### YubiKey Walkthrough (Async)
+
+Encrypt and decrypt using a YubiKey identity through a broker + operator. The operator holds the YubiKey and can run on a different machine.
+
+```bash
+# 1. Build all binaries
+./relayctl.sh build
+
+# 2. List connected YubiKey recipients
+./relayctl.sh keygen --list
+# => age1yubikey1q...
+
+# 3. If you already have a YubiKey identity, regenerate it from the slot:
+#    age-plugin-yubikey --identity --slot 1 > workspace/identity.txt
+#    Otherwise, generate a new one:
+./relayctl.sh keygen --yubikey --slot 1 --touch-policy cached
+# => Recipient: age1yubikey1q...
+# => Identity:  workspace/identity.txt
+
+# 4. Create relay-config.yaml pointing to the broker (async mode)
+cat > relay-config.yaml <<EOF
+remotes:
+  yubikey-async:
+    url: http://127.0.0.1:8443
+    unwrap_recipient: age1yubikey1q...
+    mode: async
+EOF
+
+# 5. Generate relay recipient + identity
+./relayctl.sh generate --recipient age1yubikey1q... --remote yubikey-async
+# => Relay recipient: age1relay1...
+# => Relay identity:  AGE-PLUGIN-RELAY-1...
+
+# 6. Start the broker
+./relayctl.sh broker start
+
+# 7. Compute the routing tag for the YubiKey recipient
+./relayctl.sh tag --recipient age1yubikey1q...
+# => Tag: <base64-tag>
+
+# 8. Start the operator (holds the YubiKey, polls the broker)
+./relayctl.sh operator start \
+  --broker http://127.0.0.1:8443 \
+  --identity workspace/identity.txt \
+  --tag <base64-tag>
+
+# 9. Encrypt a message (no broker/operator/YubiKey needed)
+echo "hello async yubikey" | ./relayctl.sh encrypt -r age1relay1... -o workspace/secret.age
+
+# 10. Decrypt (posts intent to broker → operator unwraps via YubiKey → fulfills)
+./relayctl.sh decrypt -i workspace/relay-identity.txt -f workspace/secret.age --config relay-config.yaml
+# => hello async yubikey
+
+# 11. Clean up
+./relayctl.sh stop && ./relayctl.sh clean
 ```

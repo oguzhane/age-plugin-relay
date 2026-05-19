@@ -53,6 +53,8 @@ Three actors: **Plugin**, **Broker**, **Operator**.
 }
 ```
 
+Note: The stanza `type` reflects the original inner recipient type (e.g., `"X25519"` for native, `"piv-p256"` for YubiKey, or any other plugin stanza type).
+
 `outer_hash` covers every envelope field outside `encrypted_payload` (the [Complete Outer Field Binding](ARCHITECTURE.md#35-outer-hash-construction) principle):
 
 `outer_hash` = `SHA-256("1.unwrap.a3f12c4e8b9d6f0a1b2c3d4e5f6a7b8c.QPg24ggKk7xKd2t3c5rL9A.1715350800.<intent_claim_pub>")`

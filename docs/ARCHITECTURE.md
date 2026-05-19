@@ -15,16 +15,16 @@ ENCRYPTION (offline — no relay needed)        DECRYPTION (online — relay req
   Extract inner recipient string                Receive relay stanzas from age header
     |                                             |
     v                                             v
-  age.ParseRecipients() -> Wrap()               Match stanzas by tag, reconstruct inner stanzas
+  Parse recipient (native or plugin) -> Wrap()  Match stanzas by tag, reconstruct inner stanzas
     |                                             |
     v                                             v
-  Re-tag stanza: X25519 -> relay                Resolve remote name (from config)
+  Re-tag stanza: <inner_type> -> relay                Resolve remote name (from config)
     |                                             |
     v                                             v
   Done. No network. Identity-agnostic.          Build encrypted payload → HTTP POST → decrypt response
 ```
 
-**Encryption** uses only the inner recipient's public key — no relay, no network, no hardware. The plugin delegates to `age.ParseRecipients()`, so it works with any recipient type the `age` library (or plugins in `PATH`) can parse.
+**Encryption** uses only the inner recipient's public key — no relay, no network, no hardware. The plugin parses the inner recipient (native or plugin — see §3.7), so it works with any recipient type age supports.
 
 **Decryption** builds an encrypted inner payload (age-encrypted to the operator's recipient), sends it to the relay endpoint, and decrypts the age-encrypted response. The relay/broker never sees plaintext stanzas or file keys.
 
@@ -36,7 +36,7 @@ Both directions use `age.Encrypt`/`age.Decrypt` as the sole cryptographic primit
 
 ### 2.1. Recipient: `age1relay1<bech32(inner_recipient_string)>`
 
-The Bech32 data payload is the UTF-8 bytes of the inner age recipient string. The plugin extracts it, calls `age.ParseRecipients()`, and delegates `Wrap()` to the parsed recipient.
+The Bech32 data payload is the UTF-8 bytes of the inner age recipient string. The plugin extracts it, parses the recipient (native or plugin — see §3.7), and delegates `Wrap()` to the parsed recipient.
 
 The inner recipient can be any age recipient type:
 
@@ -67,7 +67,7 @@ At decrypt time, the plugin looks up the remote name in `relay-config.yaml` to g
 <body>
 ```
 
-Example with an X25519 inner recipient:
+Example with an X25519 inner recipient (any age recipient type works — YubiKey, hybrid PQ, or any plugin):
 
 ```
 -> relay QPg24ggKk7xKd2t3c5rL9A X25519 CKTwCgeHBEBFmdC7GJSffbto8y+8G8iPHhTeMnhxIg4
@@ -142,6 +142,8 @@ age-encrypted to the operator's recipient. Contains the stanzas and ephemeral ke
   "intent_claim_secret": "<Ed25519 private key seed, base64 raw std>"
 }
 ```
+
+Note: The stanza `type` reflects the original inner recipient type. Examples: `X25519` (native), `piv-p256` (YubiKey), or any other plugin stanza type.
 
 | Field | Description |
 |---|---|
@@ -269,6 +271,24 @@ data: {"encrypted_payload": "<age-encrypted blob>"}
 
 Unknown event types are silently ignored for forward compatibility. SSE is purely a transport concern (connection keep-alive), orthogonal to encryption.
 
+### 3.7. Plugin-Agnostic Recipient Dispatch
+
+The relay supports any age recipient and identity type — native (X25519, hybrid PQ) or plugin-backed (YubiKey, any `age-plugin-*`).
+
+**The problem:** The core age library's `age.ParseRecipients()` and `age.ParseIdentities()` only handle native types. Plugin recipients (`age1yubikey1q...`) and plugin identities (`AGE-PLUGIN-YUBIKEY-1...`) require the `filippo.io/age/plugin` package, which spawns an external binary via the age plugin protocol (stdin/stdout state machine).
+
+**Dispatch pattern:** Implemented by `parseAnyRecipient()` and `ParseAnyIdentities()` in `relay/recipient_parse.go`. Try native parsing first. If that fails, detect the plugin name from the recipient/identity string (e.g., `age1yubikey1q...` → plugin name `yubikey`) and delegate to the age plugin framework. The framework spawns `age-plugin-<name>` via `--age-plugin=recipient-v1` (encryption) or `--age-plugin=identity-v1` (decryption). This is the same dispatch pattern the `age` CLI uses internally.
+
+**Plugin binary requirement:** The external `age-plugin-<name>` binary must be in `PATH` wherever that recipient/identity type is used — the same requirement as using the recipient directly with `age`. Specifically:
+
+| Machine | Needs plugin binary for |
+|---|---|
+| Encryption machine | Inner recipient's plugin (e.g., `age-plugin-yubikey` for `age1yubikey1q...`) |
+| Relay-server / operator | Unwrap identity's plugin (e.g., `age-plugin-yubikey` for `AGE-PLUGIN-YUBIKEY-1...`) |
+| Plugin (decrypt side) | `unwrap_recipient`'s plugin if it's a non-native type |
+
+**Ephemeral keys are always X25519.** The ephemeral keypair used for response encryption is a transport concern internal to the relay protocol, independent of the inner recipient type. Even when the inner recipient is YubiKey P-256, the response envelope is encrypted to an ephemeral X25519 key generated per intent.
+
 ---
 
 ## 4. Sync Flow
@@ -305,7 +325,7 @@ Authorization: Bearer <auth_token>
 
 **Plugin build steps:**
 
-1. Generate ephemeral age X25519 identity (keypair).
+1. Generate ephemeral age X25519 identity (keypair). *(Ephemeral keys are always X25519 in age, regardless of the inner recipient type.)*
 2. Generate Ed25519 intent claim keypair.
 3. Build inner request payload: `{nonce, outer_hash, stanzas, ephemeral_key, intent_claim_secret}`.
 4. `age.Encrypt(inner, unwrap_recipient)` → `encrypted_payload`.
@@ -985,6 +1005,7 @@ age-plugin-relay/
 │   ├── payload.go                      # Encrypted payload: EncryptPayload, DecryptPayload, OuterHash, inner types
 │   ├── claim.go                        # Intent Claim: Ed25519 keypair generation, signing, verification
 │   ├── envelope.go                     # Age response encryption: SealResponse, OpenResponse
+│   ├── recipient_parse.go              # Plugin-agnostic recipient/identity parsing dispatch
 │   ├── broker/                         # Broker queue package (package broker)
 │   │   ├── types.go                    # Intent, Status, PullResponse, PollResponse
 │   │   ├── queue.go                    # In-memory intent queue with TTL sweep
@@ -999,7 +1020,8 @@ age-plugin-relay/
 │   ├── envelope_test.go               # Envelope seal/open unit tests (age encryption)
 │   ├── async_test.go                  # Async (broker) tests (broker protocol, E2E)
 │   ├── integration_test.go            # Integration tests (age.Encrypt/Decrypt E2E, broker blindness, tampering)
-│   └── e2e_test.go                    # E2E tests (real binaries, full user flow)
+│   ├── e2e_test.go                    # E2E tests (real binaries, full user flow)
+│   └── e2e_plugin_test.go             # E2E tests with non-X25519 plugin recipient (age-plugin-stub)
 ├── cmd/
 │   ├── age-plugin-relay/
 │   │   └── main.go                     # Plugin binary: flags, --generate, HandleRecipient/Identity
@@ -1009,6 +1031,8 @@ age-plugin-relay/
 │   │   └── main.go                     # Zero-trust broker: stores/forwards opaque encrypted payloads
 │   └── relay-operator/
 │       └── main.go                     # Operator CLI: pull, decrypt, verify, unwrap, seal, fulfill/reject
+│   age-plugin-stub/
+│       └── main.go                     # Minimal test plugin binary (wraps X25519 under "stub" type for E2E tests)
 ├── docs/
 │   ├── ARCHITECTURE.md                 # This file — authoritative technical reference
 │   ├── ASYNC-WIRE-FORMAT.md            # Async wire format reference

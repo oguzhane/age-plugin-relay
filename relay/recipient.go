@@ -3,7 +3,6 @@ package relay
 import (
 	"encoding/base64"
 	"fmt"
-	"strings"
 
 	"filippo.io/age"
 )
@@ -24,16 +23,13 @@ func NewRelayRecipient(data []byte) (*RelayRecipient, error) {
 		return nil, ErrNoInnerRecipient
 	}
 
-	recipients, err := age.ParseRecipients(strings.NewReader(innerStr))
+	recipient, err := parseAnyRecipient(innerStr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing inner recipient: %w", err)
 	}
-	if len(recipients) == 0 {
-		return nil, fmt.Errorf("no recipients parsed from %q", innerStr)
-	}
 
 	return &RelayRecipient{
-		inner:    recipients[0],
+		inner:    recipient,
 		innerStr: innerStr,
 		tag:      ComputeTag(innerStr),
 	}, nil

@@ -36,7 +36,6 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 	"time"
 
 	"filippo.io/age"
@@ -103,7 +102,7 @@ func generateNonce() (string, error) {
 // EncryptPayload age-encrypts an InnerRequestPayload to the given recipient
 // string. Returns the base64-encoded ciphertext.
 func EncryptPayload(inner InnerRequestPayload, recipientStr string) (string, error) {
-	recipient, err := age.ParseX25519Recipient(recipientStr)
+	recipient, err := ParseRecipientString(recipientStr)
 	if err != nil {
 		return "", fmt.Errorf("parsing recipient %q: %w", recipientStr, err)
 	}
@@ -208,10 +207,8 @@ func VerifyResponsePayload(inner *InnerResponsePayload, version int, action, int
 }
 
 // ParseRecipientString parses a recipient string into an age.Recipient.
-// Supports X25519 recipients (age1...). Returns an error for unsupported types.
+// Supports any age recipient type: native (X25519, hybrid PQ) or plugin.
+// For plugin recipients, the external plugin binary must be in PATH.
 func ParseRecipientString(recipientStr string) (age.Recipient, error) {
-	if strings.HasPrefix(recipientStr, "age1") {
-		return age.ParseX25519Recipient(recipientStr)
-	}
-	return nil, fmt.Errorf("unsupported recipient type: %q", recipientStr)
+	return parseAnyRecipient(recipientStr)
 }

@@ -20,7 +20,7 @@ go test ./relay -run TestAsync -v              # async (broker) tests
 | `TestComputeTagDifferent` | Different inputs produce different tags |
 | `TestEncodeDecodeRecipient` | `age1relay1...` round-trips through Bech32 encode/decode |
 | `TestEncodeDecodeIdentity` | `AGE-PLUGIN-RELAY-1...` round-trips with tag and remote name preserved |
-| `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, inner type `X25519` |
+| `TestWrapProducesRelayStanzas` | `Wrap()` produces stanzas with type `relay`, correct tag, and preserves the original inner stanza type |
 
 ### Identity tests (`identity_test.go`)
 
@@ -91,7 +91,7 @@ go test ./relay -run TestAsync -v              # async (broker) tests
 | `TestNonceUniqueness` | Two encryptions of same payload produce different ciphertext |
 | `TestEncryptDecryptFullFlow` | End-to-end: build → encrypt → decrypt → verify |
 | `TestResponsePayloadFullFlow` | Build response → verify → decode file key |
-| `TestParseRecipientStringValid` | Valid X25519 recipient parses successfully |
+| `TestParseRecipientStringValid` | Valid age recipient parses successfully (native and plugin types) |
 | `TestParseRecipientStringUnsupported` | Non-age recipient returns unsupported error |
 | `TestParseRecipientStringInvalid` | Invalid age1 string returns parse error |
 | `TestOuterHashTamperDetectionTag` | Encrypt → decrypt → verify with tampered tag fails |
@@ -224,3 +224,10 @@ E2E tests build all binaries and run the full encrypt → relay → decrypt flow
 | `TestE2ESyncServerDown` | Plugin returns error when relay server is unreachable |
 | `TestE2ESyncWrongKey` | Sync relay rejects when identity doesn't match the stanzas |
 | `TestE2EAsyncBrokerDown` | Plugin returns error when broker is unreachable |
+
+### Plugin-agnostic flow (`e2e_plugin_test.go`)
+
+| Test | What it validates |
+|---|---|
+| `TestE2EPluginAgnosticSync` | Full sync flow with a non-X25519 plugin recipient (`age-plugin-stub`), proving plugin-agnostic dispatch |
+| `TestE2EPluginAgnosticAsync` | Full async flow with a non-X25519 plugin recipient (`age-plugin-stub`), end-to-end through broker and operator |
